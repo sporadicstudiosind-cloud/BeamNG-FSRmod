@@ -15,6 +15,12 @@ A row marked `NOT TESTED` is an invitation to test it, not a claim.
 | `predicted ✘` | AMD documents no support; the model hides the option and gives a reason. |
 | `runtime-gated` | The final answer comes from AMD's `ffxQuery` version enumeration against your actual device and driver, which overrides this table. |
 
+## Products
+
+Both products are gated by the same capability model, so the GPU table below
+applies to whichever you install. Frame generation and upscaling columns are
+independent: a GPU can qualify for one and not the other.
+
 ## GPUs
 
 | GPU | Analytical upscaling (FSR 3.1.5) | ML upscaling (FSR 4.1.1) | Analytical frame gen (3.1.x) | ML frame gen (4.0.x) | Anti-Lag 2 | Tested |
@@ -84,7 +90,9 @@ To be precise about the difference between "tested" and "unverified":
 | --- | --- |
 | FSR API usage is real and current | Compiled against AMD FSR SDK 2.3.0's actual headers with mingw-w64 |
 | The bridge links into three correctly-exported DLLs | `objdump -p` export tables match the system DLLs |
-| Capability rules match AMD's published requirements | 118 unit tests, including one per GPU class above |
+| Capability rules match AMD's published requirements | 146 unit tests, including one per GPU class above |
 | Planner never selects an unavailable feature | Unit tests over the full settings × capability matrix |
 | Settings survive save/load/corruption | Unit tests including malformed and truncated input |
-| Packaging produces both artefacts | `tools/package.py` executed end to end |
+| Packaging produces both products | `tools/package.py` executed end to end |
+| The two products co-install safely | Overlapping files verified byte-identical; no loose files at either archive root |
+| Module gating works | 11 unit tests over present/absent/both/malformed manifests |

@@ -10,6 +10,10 @@ feature, what was detected, and the fallback taken.
 
 The mod is running but cannot see the bridge.
 
+0. **Check you copied the `beamng_fsr\` subfolder too.** The bridge folder
+   contains `beamng_fsr\modules\<product>.module.json`, and without it the
+   runtime does not start that product at all — see the next entry.
+
 1. **Check the DLLs are in the right folder.** They go beside
    `BeamNG.drive.exe` (usually `Bin64\`), not in the mods folder and not in the
    game root.
@@ -24,6 +28,12 @@ The mod is running but cannot see the bridge.
 Turn off **UI Hardware Acceleration** in BeamNG's options. BeamNG's CEF-based
 UI conflicts with DXGI-level interception when it is enabled — the same
 behaviour reported with ReShade. See `LIMITATIONS.md` §7.
+
+## One product works and the other says "not installed on the bridge side"
+
+The runtime found one manifest but not the other. Copy the missing product's
+`bridge\beamng_fsr\modules\` folder over again. The two products deliberately
+do not enable each other, so a missing manifest disables exactly one of them.
 
 ## "Safe mode is active"
 
@@ -44,8 +54,8 @@ FSR will not run on substituted data, so it stops instead.
 
 1. **Set Lighting Quality to Low or higher.** BeamNG only generates motion
    vectors above that threshold. This is the most common cause.
-2. **Check the mod half is enabled** in BeamNG's mod manager. Without it the
-   beacon does not exist and the bridge falls back to heuristics.
+2. **Check the product's mod ZIP is enabled** in BeamNG's mod manager. Without
+   it the beacon does not exist and the bridge falls back to heuristics.
 3. **Check the log for "beacon"** entries. If the PostEffect failed to create,
    the error is recorded verbatim.
 4. **Check for "an interface this build does not wrap"** in the log — see
@@ -69,7 +79,7 @@ never hides an option without saying why. Common answers:
 The AMD runtime is not beside the bridge. Copy the three
 `amd_fidelityfx_*_dx12.dll` files from the AMD FSR SDK's
 `Kits/FidelityFX/signedbin` folder into the same directory as
-`beamng_fsr_bridge.dll`, or reinstall the bridge package.
+`beamng_fsr_bridge.dll`, or reinstall that product's bridge folder.
 
 ## Frame generation is on but the frame rate does not change
 
@@ -102,7 +112,8 @@ fixes this. Use frame generation instead, or a gentler quality preset.
 
 ## Reporting a problem
 
-Advanced → **Export diagnostic report**. It writes
-`beamng_fsr_diagnostics.json` into your BeamNG user folder with GPU, API, OS,
-driver, settings, plan and the recent log. Attach it along with
-`bridge.log` and `bridge.log.1`.
+Advanced → **Export report** in the panel for the product that is misbehaving.
+It writes `beamng_fsr_framegen_diagnostics.json` or
+`beamng_fsr_upscaling_diagnostics.json` into your BeamNG user folder with GPU,
+API, OS, driver, settings, plan and the recent log. Attach it along with
+`beamng_fsr\bridge.log` and `bridge.log.1`.

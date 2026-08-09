@@ -31,7 +31,7 @@ cmake --build native/build
 ./native/build/bfsr_tests
 ```
 
-Expect `118 passed, 0 failed`. Filter with `./native/build/bfsr_tests Plan`.
+Expect `146 passed, 0 failed`. Filter with `./native/build/bfsr_tests Plan`.
 
 ## 3. Build the Windows bridge
 
@@ -90,8 +90,23 @@ python3 tools/package.py \
   --sdk-dir third_party/FidelityFX-SDK
 ```
 
-Produces `dist/beamng_fsr.zip` (the BeamNG mod) and `dist/beamng_fsr_bridge/`
-(the native half plus AMD's signed DLLs and licence).
+Produces both products:
+
+```
+dist/framegen/beamng_fsr_framegen.zip     dist/framegen/bridge/
+dist/upscaling/beamng_fsr_upscaling.zip   dist/upscaling/bridge/
+```
+
+Each `bridge/` folder holds the same three bridge DLLs plus AMD's loader, that
+product's AMD effect DLL, its licence, and `beamng_fsr/modules/<id>.module.json`
+— the manifest that tells the shared runtime the product is installed.
+
+Build one product only with `--product framegen` or `--product upscaling`.
+
+Two invariants the packager upholds, and CI re-checks: every file the two
+products share is byte-identical, and neither archive contains a loose file at
+its root (BeamNG's packing rules forbid those, and a root-level file would let
+one product shadow the other's).
 
 ## Layout
 
@@ -100,13 +115,18 @@ native/
   include/beamng_fsr/   public headers
   src/core/             JSON, logging, settings, paths
   src/caps/             capability model (portable) + D3D12 detection
+  src/modules/          module registry — which products are installed
   src/ffx/              AMD FSR loader, upscaler, frame generation, Anti-Lag 2
   src/d3d12/            device/factory proxies, resource registry, beacon matching
-  src/pipeline/         Auto-mode planner, frame pacing, bridge runtime
-  src/ipc/              protocol (portable) + file transport
+  src/pipeline/         the two planners, frame pacing, bridge runtime
+  src/ipc/              protocol (portable) + one file channel per product
   src/proxy/            the two DLL stubs and their .def export lists
-  tests/                118 tests over everything portable
-mod/                    the BeamNG mod ZIP contents
+  tests/                146 tests over everything portable
+mods/
+  framegen/             frame generation mod ZIP source
+  upscaling/            upscaling mod ZIP source
+  shared/               files copied identically into both ZIPs
+packaging/manifests/    the module manifests that gate each product
 tools/                  SDK fetch, packaging
 docs/                   this documentation
 ```
@@ -114,3 +134,8 @@ docs/                   this documentation
 The `src/` split follows one rule: anything that can be tested without a GPU
 lives in `bfsr_core` and is tested. Everything else is a thin layer over a
 platform API.
+
+The `mods/` split follows a second: anything byte-identical between the two
+products lives in `mods/shared/` and is copied into both at package time, so
+there is exactly one copy to maintain and co-installation cannot produce a
+conflict.

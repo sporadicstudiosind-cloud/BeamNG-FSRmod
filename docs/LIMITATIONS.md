@@ -123,7 +123,7 @@ result in this repository is claimed as measured.**
 
 The build environment had no BeamNG installation, no AMD GPU and no Windows
 machine. What *was* verified is stated precisely in the README's audit table:
-the code compiles against AMD's real headers, the portable logic passes 118
+the code compiles against AMD's real headers, the portable logic passes 146
 unit tests, and the packaging pipeline runs end to end. Everything requiring
 hardware is marked `NOT TESTED` in `COMPATIBILITY_MATRIX.md`, and `TESTING.md`
 is written so someone with the hardware can execute it.

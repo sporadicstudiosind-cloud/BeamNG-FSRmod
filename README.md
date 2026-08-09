@@ -176,7 +176,7 @@ a command was run and its output checked, not that the code looks right.
 The architecture is sound and sourced. The native bridge compiles against AMD's
 real API and produces correctly-exported DLLs. The decision logic — the part
 where a mistake means promising a user something their hardware cannot do — is
-covered by 118 tests that run without a GPU.
+covered by 146 tests that run without a GPU.
 
 What is missing is everything that needs a Windows machine with a GPU and a
 BeamNG install: whether it runs, how fast, how it looks, and whether the two

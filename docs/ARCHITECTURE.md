@@ -43,26 +43,34 @@ without touching the other.
 │      │                                                                 │
 │      │ renders scene → #prepass[Depth], #VelocityBuffer[RT0]          │
 │      ▼                                                                 │
-│  ┌──────────────── MOD HALF (normal BeamNG mod ZIP) ───────────────┐  │
-│  │  lua/ge/extensions/fsr/bridge.lua   state, IPC, settings        │  │
-│  │  lua/ge/extensions/fsr/beacon.lua   PostEffect lifecycle        │  │
-│  │  shaders/fsr/fsrBeaconP.hlsl        packs depth + velocity ─────┼──┼─┐
-│  │  ui/modules/apps/FsrSettings/       settings and diagnostics    │  │ │
+│  ┌──────────── MOD HALVES (one BeamNG mod ZIP per product) ────────┐  │
+│  │  SHARED (byte-identical in both ZIPs)                           │  │
+│  │    lua/ge/extensions/fsr_core/common.lua  state, IPC, beacon RC │  │
+│  │    lua/ge/extensions/fsr_core/beacon.lua  PostEffect lifecycle   │  │
+│  │    shaders/fsr/fsrBeaconP.hlsl            depth + velocity ──────┼──┼─┐
+│  │  FRAME GENERATION           │  UPSCALING                        │  │ │
+│  │    lua/.../fsr_fg/main.lua  │    lua/.../fsr_up/main.lua        │  │ │
+│  │    ui/.../FsrFrameGeneration│    ui/.../FsrUpscaling            │  │ │
 │  └─────────────────────────────────────────────────────────────────┘  │ │
-│      │ file IPC (JSON, ~10 Hz)                                        │ │
+│      │ one file IPC channel per product (JSON, ~10 Hz)                │ │
 │      ▼                                                                 │ │
 │  ┌──────────── NATIVE HALF (Microsoft APIs only) ──────────────────┐  │ │
 │  │  dxgi.dll   → DxgiFactoryProxy    → sees swapchain creation     │  │ │
 │  │  d3d12.dll  → D3D12DeviceProxy    → sees texture creation ◄─────┼──┼─┘
 │  │                                                                  │  │
-│  │  beamng_fsr_bridge.dll                                          │  │
-│  │    BridgeRuntime      module gating, orchestration, failure policy             │  │
+│  │  beamng_fsr_bridge.dll   one runtime, two gated modules          │  │
+│  │    ModuleRegistry     which products declared themselves        │  │
+│  │    BridgeRuntime      module gating, orchestration, failsafe    │  │
 │  │    FfxLoader          amd_fidelityfx_loader_dx12.dll            │  │
-│  │    FsrUpscaler        ffxDispatchDescUpscale                    │  │
+│  │    ── frame generation module ──────────────────────────────    │  │
 │  │    FsrFrameGenerator  FG context + interpolation swapchain      │  │
 │  │    AntiLag2           AMD driver extension                      │  │
+│  │    resolveFrameGenPlan()                                        │  │
+│  │    ── upscaling module ─────────────────────────────────────    │  │
+│  │    FsrUpscaler        ffxDispatchDescUpscale                    │  │
+│  │    resolveUpscalePlan()                                         │  │
+│  │    ── shared ───────────────────────────────────────────────    │  │
 │  │    ResourceRegistry   descriptions of live textures             │  │
-│  │    resolvePlan()      what actually runs, and why               │  │
 │  └──────────────────────────────────────────────────────────────────┘  │
 │      │ Present                                                         │
 └────────┼───────────────────────────────────────────────────────────────┘
@@ -138,7 +146,7 @@ this device has no provider, and the UI says exactly that.
 
 | Layer | Depends on | Tested |
 | --- | --- | --- |
-| `bfsr_core` — JSON, settings, capabilities, planner, pacing, IPC protocol, beacon matching | nothing platform-specific | **118 unit tests, run in CI** |
+| `bfsr_core` — JSON, settings, capabilities, both planners, pacing, IPC protocol, beacon matching, module registry | nothing platform-specific | **146 unit tests, run in CI** |
 | `bfsr_bridge` — D3D12/DXGI proxies, FFX contexts, detection, runtime | D3D12, DXGI, AMD FSR | compile-verified against AMD's real headers |
 | stubs | Windows loader | export tables verified against the system DLLs |
 

@@ -14,7 +14,7 @@ cmake -S native -B native/build -DBFSR_BUILD_BRIDGE=OFF
 cmake --build native/build && ./native/build/bfsr_tests
 ```
 
-118 tests over every module that can be tested without a graphics device.
+146 tests over every module that can be tested without a graphics device.
 
 | Suite | Tests | Covers |
 | --- | --- | --- |
@@ -26,6 +26,8 @@ cmake --build native/build && ./native/build/bfsr_tests
 | `Ipc` | 7 | Round-trip, 64-bit precision, truncated documents, protocol mismatch |
 | `Benchmark` | 11 | Rendered/generated separation, unmeasured-vs-zero, CSV/JSON export |
 | `Beacon` + `Heuristic` | 15 | Exact/ambiguous/no match, stale resources, format predicates |
+| `Modules` | 11 | Manifest gating: neither installed, one, both, mismatched body, malformed, rescan |
+| `PlanIndependence` | 5 | Neither planner reads the other's settings or changes when the other is absent |
 
 Three specific properties are asserted because getting them wrong would make the
 project dishonest rather than merely broken:
@@ -36,6 +38,12 @@ project dishonest rather than merely broken:
    `EveryUnavailableFeatureExplainsItself` fails on an empty or terse reason.
 3. **ML upscaling and ML frame generation have different requirements.**
    `Rdna3GetsMlUpscalingButNotMlFrameGen` fails if they are ever conflated.
+4. **The two products are independent.** `PlanIndependence` fails if either
+   planner's output changes because of the other, and `Modules` fails if one
+   product's manifest can enable the other.
+5. **AMD's own base-framerate thresholds are used, not an invented one.**
+   `AutoUsesAmdsDocumentedThresholdPerImplementation` fails if a single
+   threshold is applied to both implementations.
 
 ## Part 2 — Compile and package verification
 
@@ -43,9 +51,10 @@ project dishonest rather than merely broken:
 | --- | --- |
 | Bridge compiles against AMD's real headers | `cmake --build native/build-win` |
 | Proxy exports match the system DLLs | `objdump -p native/build-win/dxgi.dll` |
-| Lua parses | `luajit -bl mod/lua/ge/extensions/fsr/*.lua` |
-| UI JavaScript parses | `node --check mod/ui/modules/apps/FsrSettings/app.js` |
+| Lua parses | `find mods -name '*.lua' -exec luajit -bl {} \\;` |
+| UI JavaScript parses | `find mods -name '*.js' -exec node --check {} \\;` |
 | Packaging runs end to end | `python3 tools/package.py --sdk-dir ...` |
+| The products can co-install | CI: overlapping files byte-identical, no loose root files |
 
 ---
 
@@ -65,7 +74,19 @@ For each: does the UI offer exactly what `COMPATIBILITY_MATRIX.md` predicts? A
 mismatch either way is a bug — an option that should not be there, or a missing
 one.
 
-### 3.2 First-run checks
+### 3.2 Product-independence checks (do these first)
+
+The whole premise of shipping two products is that either works alone. Verify
+it before anything else:
+
+| Installed | Expected |
+| --- | --- |
+| Frame generation only | Its panel works. No upscaling settings file appears. The log lists upscaling as "not installed". |
+| Upscaling only | Its panel works. The swapchain is never wrapped — confirm no frame-generation lines in the log. |
+| Both | Both panels work; each reports the other as installed. Shared bridge files are not duplicated or in conflict. |
+| Both, then one manifest deleted | That product goes inert on the next launch; the other is unaffected. |
+
+### 3.3 First-run checks
 
 1. Bridge loads; `bridge.log` contains the environment block.
 2. Diagnostics shows the correct GPU, `Direct3D 12`, and a plausible shader model.
@@ -74,7 +95,7 @@ one.
 5. Launch under Vulkan → every option disabled with the Vulkan explanation.
 6. Launch under D3D11 → same, with the D3D11 explanation.
 
-### 3.3 Calibration (do this before anything else)
+### 3.4 Calibration (do this before measuring anything)
 
 The depth and motion-vector defaults are unverified assumptions
 (`LIMITATIONS.md` §5). Confirm them first or every later result is meaningless.
@@ -86,7 +107,7 @@ The depth and motion-vector defaults are unverified assumptions
    then adjust the scales.
 4. Record what worked. That turns an assumption into a fact.
 
-### 3.4 Scenarios
+### 3.5 Scenarios
 
 Each at 1080p, 1440p and 4K, with FG off / FG on / upscaling on / both:
 
@@ -102,7 +123,7 @@ Each at 1080p, 1440p and 4K, with FG off / FG on / upscaling on / both:
 | Large map, streaming | Frame-time hitches → gate suppression |
 | UI-heavy menus | UI interpolation and compositing |
 
-### 3.5 State transitions
+### 3.6 State transitions
 
 Each must not crash, not leak, and not produce a visible artefact on resume:
 
@@ -111,7 +132,7 @@ alt-tab · minimise/restore · resolution change · fullscreen↔windowed ·
 switch FSR version at runtime · toggle FG while driving · enter/leave replay ·
 enter/leave photo mode · disconnect a display · trigger a GPU device reset
 
-### 3.6 Image-quality comparison
+### 3.7 Image-quality comparison
 
 Capture the same frame under each configuration and compare:
 
@@ -125,7 +146,7 @@ around fast-moving edges.
 
 Do not declare one version better without evidence. Attach the captures.
 
-### 3.7 Performance
+### 3.8 Performance
 
 Enable `Advanced → Benchmark mode`. Exports land in
 `Bin64\beamng_fsr\benchmarks\` as CSV and JSON.
@@ -142,7 +163,7 @@ Two rules for reporting:
   timings blank rather than writing 0, precisely so a spreadsheet cannot average
   them in as zero.
 
-### 3.8 Failure injection
+### 3.9 Failure injection
 
 | Injection | Expected |
 | --- | --- |
@@ -152,4 +173,6 @@ Two rules for reporting:
 | Truncate `request.json` mid-write | Ignored; previous settings retained |
 | Kill BeamNG mid-session | Next launch starts in safe mode |
 | Disable the mod half, keep the bridge | Falls back to heuristics; reports lower confidence or stays off |
+| Delete one product's module manifest | That product goes inert; the other is unaffected |
+| Install both, then remove one product's ZIP | The remaining product keeps working; the removed panel disappears |
 | Set Lighting Quality to Lowest | "motion vectors unavailable" with the Lighting Quality hint |
