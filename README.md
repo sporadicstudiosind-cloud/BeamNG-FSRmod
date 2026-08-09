@@ -1,7 +1,19 @@
 # BeamNG FSR Bridge
 
-AMD FidelityFX Super Resolution upscaling and frame generation for
-BeamNG.drive's Direct3D 12 renderer.
+Two independent products for BeamNG.drive's Direct3D 12 renderer:
+
+| Product | What it adds | Install |
+| --- | --- | --- |
+| **AMD FSR Frame Generation** | ML frame generation on RDNA 4, analytical frame generation elsewhere, plus AMD Radeon Anti-Lag 2 | `dist/framegen/` |
+| **AMD FSR Upscaling** | ML upscaling on RX 9000 / RX 7000, analytical FSR 3.1.x elsewhere | `dist/upscaling/` |
+
+**Each works completely on its own.** Neither requires the other, neither knows
+whether the other is installed, and installing both is supported — they ship the
+same bridge binaries, so copying one over the other is a no-op. What differs is
+a one-line module manifest, and the shared runtime starts a feature only when
+its manifest is present.
+
+If you only want one thing, install only that one thing.
 
 ---
 
@@ -50,15 +62,18 @@ conflated.
 
 ## Install
 
-Both halves are required. See [`docs/INSTALL.md`](docs/INSTALL.md).
+Pick a product; each needs both of its halves. See [`docs/INSTALL.md`](docs/INSTALL.md).
 
 ```
-beamng_fsr.zip          →  %LOCALAPPDATA%\BeamNG.drive\<version>\mods\
-beamng_fsr_bridge\*     →  ...\BeamNG.drive\Bin64\   (beside BeamNG.drive.exe)
+dist/framegen/beamng_fsr_framegen.zip   →  %LOCALAPPDATA%\BeamNG.drive\<version>\mods\
+dist/framegen/bridge/*                  →  ...\BeamNG.drive\Bin64\
 ```
 
-No BeamNG file is modified, overwritten or replaced. Uninstalling is deletion
-and nothing else ([`docs/UNINSTALL.md`](docs/UNINSTALL.md)).
+Same shape for `dist/upscaling/`. No BeamNG file is modified, overwritten or
+replaced. Uninstalling is deletion and nothing else
+([`docs/UNINSTALL.md`](docs/UNINSTALL.md)) — and deleting just one product's
+`beamng_fsr/modules/*.module.json` disables that product while leaving the other
+working.
 
 ## How it works
 
@@ -66,10 +81,17 @@ and nothing else ([`docs/UNINSTALL.md`](docs/UNINSTALL.md)).
 dxgi.dll   (proxy) → wraps IDXGIFactory7 → sees swapchain creation
 d3d12.dll  (proxy) → wraps ID3D12Device  → sees texture creation
                    ↓
-         beamng_fsr_bridge.dll → AMD FSR contexts, planning, diagnostics
-                   ↑ file IPC
-         BeamNG mod → PostFX beacon publishes depth + motion vectors
+         beamng_fsr_bridge.dll   one runtime, two independent modules
+           ├─ framegen  ← started only if framegen.module.json exists
+           └─ upscaling ← started only if upscaling.module.json exists
+                   ↑ one file IPC channel per product
+         BeamNG mod(s) → shared PostFX beacon publishes depth + motion vectors
 ```
+
+The **module manifest** is what makes the products separable. Each ships one;
+the runtime starts a feature only when its manifest is present. Install frame
+generation alone and the swapchain is never even wrapped for upscaling, no
+upscaling settings file is read, and no upscaling status is published.
 
 The **beacon** is the key idea. Rather than the bridge guessing which of
 hundreds of textures is the depth buffer, the mod half copies BeamNG's
@@ -89,7 +111,7 @@ Full detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 ```bash
 python3 tools/fetch_fsr_sdk.py --dest third_party/FidelityFX-SDK
 cmake -S native -B native/build -DBFSR_BUILD_BRIDGE=OFF
-cmake --build native/build && ./native/build/bfsr_tests    # 118 tests
+cmake --build native/build && ./native/build/bfsr_tests    # 146 tests
 ```
 
 Windows bridge and packaging: [`docs/BUILD.md`](docs/BUILD.md).
@@ -127,7 +149,9 @@ a command was run and its output checked, not that the code looks right.
 | Runtime version discovery + selection | ✅ | ⚠️ compile-verified only | — | AMD's `ffxQuery` / `ffxOverrideVersion`; nothing hardcoded |
 | GPU / API / OS / SM detection | ✅ | ✅ policy layer unit-tested | — | Adapter matched by LUID, not index |
 | Capability model | ✅ | ✅ 15 unit tests, one per GPU class | — | Encodes AMD's published requirements |
-| Auto mode | ✅ | ✅ 22 unit tests | — | Explains every decision; never picks an unavailable feature |
+| Two separately installable products | ✅ | ✅ 11 module tests + 5 independence tests + a CI co-install check | — | Manifest-gated; overlapping files verified byte-identical |
+| Frame-generation multiplier (MFG) | ⚠️ reported, not settable | ✅ read from AMD's SDK | — | SDK 2.3.0 gives the app no way to request one; `numGeneratedFrames` arrives already decided. The panel shows the observed value. |
+| Auto mode | ✅ | ✅ 27 unit tests | — | Uses AMD's own documented base-fps thresholds (60 fps for FG 3.1.6, 30 fps for FG 4.0.1) |
 | Anti-Lag 2 | ✅ | ⚠️ MSVC builds only | AMD GPUs only | GCC/Clang can't compile AMD's header — guarded, reported unavailable |
 | Settings persistence | ✅ | ✅ unit-tested incl. corrupt input | — | Atomic write; survives reload and renderer restart |
 | Settings + diagnostics UI | ✅ | ✅ JS/JSON/HTML parse-checked | — | Not rendered in a real BeamNG UI |

@@ -4,6 +4,36 @@ The shape of this project is dictated by two facts established in
 `FEASIBILITY.md`: BeamNG's Lua sandbox cannot load native code, and AMD's FSR
 ships only a DirectX 12 backend. Everything below follows from those.
 
+## Two products, one runtime
+
+The frame generation and upscaling products are separately installable, and the
+mechanism is deliberately boring: both ship the *same* bridge binaries, and each
+drops a one-line manifest into `beamng_fsr/modules/`.
+
+```
+beamng_fsr/modules/framegen.module.json    → frame generation is installed
+beamng_fsr/modules/upscaling.module.json   → upscaling is installed
+```
+
+`ModuleRegistry::scan` reads that directory at startup and the runtime
+constructs a module's state only if its manifest is there. Concretely, with only
+the frame generation manifest present: no `FsrUpscaler` is constructed, the
+upscaling settings file is never opened, no upscaling status document is
+written, and the upscaling IPC channel does not exist. The reverse holds, and
+additionally the DXGI factory is not wrapped at all when frame generation is
+absent — upscaling has no reason to touch presentation.
+
+Two properties make co-installation safe, and both are checked in CI:
+
+1. Every file the two products share is **byte-identical**, so copying one over
+   the other is a no-op.
+2. Neither mod archive contains a loose file at its root, which BeamNG's packing
+   rules forbid and which would otherwise let one product's metadata shadow the
+   other's.
+
+The manifest is also the uninstall switch: deleting one disables that product
+without touching the other.
+
 ## The two halves
 
 ```
@@ -26,7 +56,7 @@ ships only a DirectX 12 backend. Everything below follows from those.
 │  │  d3d12.dll  → D3D12DeviceProxy    → sees texture creation ◄─────┼──┼─┘
 │  │                                                                  │  │
 │  │  beamng_fsr_bridge.dll                                          │  │
-│  │    BridgeRuntime      orchestration, failure policy             │  │
+│  │    BridgeRuntime      module gating, orchestration, failure policy             │  │
 │  │    FfxLoader          amd_fidelityfx_loader_dx12.dll            │  │
 │  │    FsrUpscaler        ffxDispatchDescUpscale                    │  │
 │  │    FsrFrameGenerator  FG context + interpolation swapchain      │  │

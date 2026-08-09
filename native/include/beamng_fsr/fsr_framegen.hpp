@@ -74,8 +74,8 @@ public:
 
     Result createContext(FfxLoader& loader,
                          ID3D12Device* device,
-                         const ResolvedPlan& plan,
-                         const Settings& settings,
+                         const FrameGenPlan& plan,
+                         const FrameGenSettings& settings,
                          DXGI_FORMAT backBufferFormat);
 
     void destroyContext();
@@ -86,16 +86,16 @@ public:
     [[nodiscard]] bool hasContext() const noexcept { return context_ != nullptr; }
     [[nodiscard]] bool hasWrappedSwapChain() const noexcept { return swapChainContext_ != nullptr; }
 
-    [[nodiscard]] bool needsRecreate(const ResolvedPlan& plan,
-                                     const Settings& settings,
+    [[nodiscard]] bool needsRecreate(const FrameGenPlan& plan,
+                                     const FrameGenSettings& settings,
                                      DXGI_FORMAT backBufferFormat) const noexcept;
 
     /// Records the motion/depth preparation for frame `frameId`.
-    Result prepare(const FrameGenPrepareInputs& inputs, const Settings& settings, uint64_t frameId);
+    Result prepare(const FrameGenPrepareInputs& inputs, const FrameGenSettings& settings, uint64_t frameId);
 
     /// Enables or disables interpolation for the coming present. Called every
     /// frame — the frame-generation gate decides `enabled`.
-    Result configure(bool enabled, const Settings& settings, uint64_t frameId);
+    Result configure(bool enabled, const FrameGenSettings& settings, uint64_t frameId);
 
     /// Hands the swapchain a texture containing the UI so it can composite it
     /// *after* interpolation. Without this, UI drawn into the backbuffer gets
@@ -114,6 +114,19 @@ public:
     [[nodiscard]] const std::string& activeVersionName() const noexcept { return versionName_; }
     [[nodiscard]] uint64_t generatedFrameCount() const noexcept { return generatedFrames_; }
 
+    /// Frames AMD's swapchain asked for on the most recent dispatch.
+    ///
+    /// SDK 2.3.0 exposes no way for an application to *request* a multiplier:
+    /// `numGeneratedFrames` arrives already filled in on the dispatch callback,
+    /// and AMD's shipping implementation sets it to 1. Reporting the observed
+    /// value is therefore the only honest thing to show — a settable
+    /// "2x / 3x / 4x" control would be inventing an API that does not exist.
+    /// The field is `outputs[4]`-wide, so if AMD ever raises it this reports
+    /// the change without a code update.
+    [[nodiscard]] uint32_t observedGeneratedPerFrame() const noexcept {
+        return observedGeneratedPerFrame_;
+    }
+
 private:
     /// Invoked by AMD's swapchain, on its own thread, when it needs the
     /// interpolated frame produced.
@@ -131,6 +144,7 @@ private:
     uint64_t versionId_ = 0;
     std::string versionName_;
     uint64_t generatedFrames_ = 0;
+    uint32_t observedGeneratedPerFrame_ = 0;
     bool lastEnabled_ = false;
 };
 

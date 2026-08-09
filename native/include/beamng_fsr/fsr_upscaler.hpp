@@ -63,8 +63,8 @@ public:
 
     Result create(FfxLoader& loader,
                   ID3D12Device* device,
-                  const ResolvedPlan& plan,
-                  const Settings& settings,
+                  const UpscalePlan& plan,
+                  const UpscaleSettings& settings,
                   bool colourIsHdr);
     void destroy();
 
@@ -72,11 +72,11 @@ public:
 
     /// True when `plan`/`settings` require tearing the context down and
     /// rebuilding it rather than just dispatching with new parameters.
-    [[nodiscard]] bool needsRecreate(const ResolvedPlan& plan,
-                                     const Settings& settings,
+    [[nodiscard]] bool needsRecreate(const UpscalePlan& plan,
+                                     const UpscaleSettings& settings,
                                      bool colourIsHdr) const noexcept;
 
-    Result dispatch(const UpscaleFrameInputs& inputs, const Settings& settings);
+    Result dispatch(const UpscaleFrameInputs& inputs, const UpscaleSettings& settings);
 
     /// AMD's own memory-usage query. Used by the planner's VRAM guard so the
     /// figure is measured rather than guessed.

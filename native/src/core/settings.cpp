@@ -15,14 +15,24 @@ T clampValue(T v, T lo, T hi) {
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
+// Readers that ignore wrongly-typed fields rather than coercing them. A
+// hand-edited or partially-written file must degrade to defaults for the field
+// it broke, never for the whole document and never into a surprising value.
 float readFloat(const Json& j, const char* key, float def) {
     const Json& v = j[key];
     return v.isNumber() ? static_cast<float>(v.asNumber(def)) : def;
 }
 
+uint32_t readUint(const Json& j, const char* key, uint32_t def) {
+    const Json& v = j[key];
+    if (!v.isNumber()) return def;
+    const double n = v.asNumber(def);
+    return n < 0.0 ? 0u : static_cast<uint32_t>(n);
+}
+
 bool readBool(const Json& j, const char* key, bool def) {
     const Json& v = j[key];
-    return v.isBool() || v.isNumber() ? v.asBool(def) : def;
+    return (v.isBool() || v.isNumber()) ? v.asBool(def) : def;
 }
 
 std::string readString(const Json& j, const char* key, const std::string& def) {
@@ -33,6 +43,42 @@ std::string readString(const Json& j, const char* key, const std::string& def) {
 } // namespace
 
 // ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+const char* toString(DepthConvention c) noexcept {
+    switch (c) {
+        case DepthConvention::Auto: return "auto";
+        case DepthConvention::ReversedZ: return "reversedZ";
+        case DepthConvention::StandardZ: return "standardZ";
+    }
+    return "auto";
+}
+
+DepthConvention depthConventionFromString(const std::string& s, DepthConvention def) {
+    if (s == "auto") return DepthConvention::Auto;
+    if (s == "reversedZ" || s == "reversed") return DepthConvention::ReversedZ;
+    if (s == "standardZ" || s == "standard") return DepthConvention::StandardZ;
+    return def;
+}
+
+const char* toString(FrameGenSelection s) noexcept {
+    switch (s) {
+        case FrameGenSelection::Disabled: return "disabled";
+        case FrameGenSelection::Auto: return "auto";
+        case FrameGenSelection::Analytical: return "analytical";
+        case FrameGenSelection::Ml: return "ml";
+    }
+    return "disabled";
+}
+
+FrameGenSelection frameGenSelectionFromString(const std::string& s, FrameGenSelection def) {
+    if (s == "disabled" || s == "off") return FrameGenSelection::Disabled;
+    if (s == "auto") return FrameGenSelection::Auto;
+    if (s == "analytical" || s == "fsr31") return FrameGenSelection::Analytical;
+    if (s == "ml" || s == "fsr4") return FrameGenSelection::Ml;
+    return def;
+}
 
 const char* toString(QualityMode m) noexcept {
     switch (m) {
@@ -78,16 +124,6 @@ const char* toString(UpscalerSelection s) noexcept {
     return "disabled";
 }
 
-const char* toString(FrameGenSelection s) noexcept {
-    switch (s) {
-        case FrameGenSelection::Disabled: return "disabled";
-        case FrameGenSelection::Auto: return "auto";
-        case FrameGenSelection::Analytical: return "analytical";
-        case FrameGenSelection::Ml: return "ml";
-    }
-    return "disabled";
-}
-
 UpscalerSelection upscalerSelectionFromString(const std::string& s, UpscalerSelection def) {
     if (s == "disabled" || s == "off") return UpscalerSelection::Disabled;
     if (s == "auto") return UpscalerSelection::Auto;
@@ -96,60 +132,55 @@ UpscalerSelection upscalerSelectionFromString(const std::string& s, UpscalerSele
     return def;
 }
 
-FrameGenSelection frameGenSelectionFromString(const std::string& s, FrameGenSelection def) {
-    if (s == "disabled" || s == "off") return FrameGenSelection::Disabled;
-    if (s == "auto") return FrameGenSelection::Auto;
-    if (s == "analytical" || s == "fsr31") return FrameGenSelection::Analytical;
-    if (s == "ml" || s == "fsr4") return FrameGenSelection::Ml;
-    return def;
-}
-
-const char* toString(DepthConvention c) noexcept {
-    switch (c) {
-        case DepthConvention::Auto: return "auto";
-        case DepthConvention::ReversedZ: return "reversedZ";
-        case DepthConvention::StandardZ: return "standardZ";
-    }
-    return "auto";
-}
-
-DepthConvention depthConventionFromString(const std::string& s, DepthConvention def) {
-    if (s == "auto") return DepthConvention::Auto;
-    if (s == "reversedZ" || s == "reversed") return DepthConvention::ReversedZ;
-    if (s == "standardZ" || s == "standard") return DepthConvention::StandardZ;
-    return def;
-}
-
+// ---------------------------------------------------------------------------
+// RenderCalibration
 // ---------------------------------------------------------------------------
 
-Json Settings::toJson() const {
+Json RenderCalibration::toJson() const {
     Json j = Json::object();
-    j.set("schemaVersion", Json(1));
-    j.set("enabled", Json(enabled));
-    j.set("safeMode", Json(safeMode));
-
-    j.set("upscaler", Json(std::string(toString(upscaler))));
-    j.set("upscalerVersionId", Json(upscalerVersionId));
-    j.set("quality", Json(std::string(toString(quality))));
-    j.set("customUpscaleRatio", Json(static_cast<double>(customUpscaleRatio)));
-    j.set("sharpeningEnabled", Json(sharpeningEnabled));
-    j.set("sharpness", Json(static_cast<double>(sharpness)));
-
-    j.set("frameGeneration", Json(std::string(toString(frameGeneration))));
-    j.set("frameGenVersionId", Json(frameGenVersionId));
-    j.set("frameGenAsyncCompute", Json(frameGenAsyncCompute));
-    j.set("frameGenUiComposition", Json(frameGenUiComposition));
-
-    j.set("antiLag2", Json(antiLag2));
-
     j.set("depthConvention", Json(std::string(toString(depthConvention))));
     j.set("depthInfinite", Json(depthInfinite));
     j.set("motionVectorScaleX", Json(static_cast<double>(motionVectorScaleX)));
     j.set("motionVectorScaleY", Json(static_cast<double>(motionVectorScaleY)));
     j.set("motionVectorFlipY", Json(motionVectorFlipY));
     j.set("motionVectorsAreUvSpace", Json(motionVectorsAreUvSpace));
+    return j;
+}
 
-    j.set("debugOverlay", Json(debugOverlay));
+RenderCalibration RenderCalibration::fromJson(const Json& j) {
+    RenderCalibration c;
+    if (!j.isObject()) return c;
+    c.depthConvention = depthConventionFromString(
+        readString(j, "depthConvention", toString(c.depthConvention)), c.depthConvention);
+    c.depthInfinite = readBool(j, "depthInfinite", c.depthInfinite);
+    c.motionVectorScaleX = readFloat(j, "motionVectorScaleX", c.motionVectorScaleX);
+    c.motionVectorScaleY = readFloat(j, "motionVectorScaleY", c.motionVectorScaleY);
+    c.motionVectorFlipY = readBool(j, "motionVectorFlipY", c.motionVectorFlipY);
+    c.motionVectorsAreUvSpace = readBool(j, "motionVectorsAreUvSpace", c.motionVectorsAreUvSpace);
+    c.sanitise();
+    return c;
+}
+
+void RenderCalibration::sanitise() {
+    motionVectorScaleX = clampValue(motionVectorScaleX, -8192.0f, 8192.0f);
+    motionVectorScaleY = clampValue(motionVectorScaleY, -8192.0f, 8192.0f);
+}
+
+bool RenderCalibration::operator==(const RenderCalibration& o) const {
+    return depthConvention == o.depthConvention && depthInfinite == o.depthInfinite &&
+           motionVectorScaleX == o.motionVectorScaleX &&
+           motionVectorScaleY == o.motionVectorScaleY &&
+           motionVectorFlipY == o.motionVectorFlipY &&
+           motionVectorsAreUvSpace == o.motionVectorsAreUvSpace;
+}
+
+// ---------------------------------------------------------------------------
+// DiagnosticsSettings
+// ---------------------------------------------------------------------------
+
+Json DiagnosticsSettings::toJson() const {
+    Json j = Json::object();
+    j.set("overlay", Json(overlay));
     j.set("debugView", Json(debugView));
     j.set("benchmarkMode", Json(benchmarkMode));
     j.set("logLevel", Json(logLevel));
@@ -157,128 +188,189 @@ Json Settings::toJson() const {
     return j;
 }
 
-Settings Settings::fromJson(const Json& j) {
-    Settings s;
-    if (!j.isObject()) return s;
-
-    s.enabled = readBool(j, "enabled", s.enabled);
-    s.safeMode = readBool(j, "safeMode", s.safeMode);
-
-    s.upscaler = upscalerSelectionFromString(readString(j, "upscaler", toString(s.upscaler)), s.upscaler);
-    s.upscalerVersionId = readString(j, "upscalerVersionId", s.upscalerVersionId);
-    s.quality = qualityModeFromString(readString(j, "quality", toString(s.quality)), s.quality);
-    s.customUpscaleRatio = readFloat(j, "customUpscaleRatio", s.customUpscaleRatio);
-    s.sharpeningEnabled = readBool(j, "sharpeningEnabled", s.sharpeningEnabled);
-    s.sharpness = readFloat(j, "sharpness", s.sharpness);
-
-    s.frameGeneration = frameGenSelectionFromString(
-        readString(j, "frameGeneration", toString(s.frameGeneration)), s.frameGeneration);
-    s.frameGenVersionId = readString(j, "frameGenVersionId", s.frameGenVersionId);
-    s.frameGenAsyncCompute = readBool(j, "frameGenAsyncCompute", s.frameGenAsyncCompute);
-    s.frameGenUiComposition = readBool(j, "frameGenUiComposition", s.frameGenUiComposition);
-
-    s.antiLag2 = readBool(j, "antiLag2", s.antiLag2);
-
-    s.depthConvention = depthConventionFromString(
-        readString(j, "depthConvention", toString(s.depthConvention)), s.depthConvention);
-    s.depthInfinite = readBool(j, "depthInfinite", s.depthInfinite);
-    s.motionVectorScaleX = readFloat(j, "motionVectorScaleX", s.motionVectorScaleX);
-    s.motionVectorScaleY = readFloat(j, "motionVectorScaleY", s.motionVectorScaleY);
-    s.motionVectorFlipY = readBool(j, "motionVectorFlipY", s.motionVectorFlipY);
-    s.motionVectorsAreUvSpace = readBool(j, "motionVectorsAreUvSpace", s.motionVectorsAreUvSpace);
-
-    s.debugOverlay = readBool(j, "debugOverlay", s.debugOverlay);
-    s.debugView = readBool(j, "debugView", s.debugView);
-    s.benchmarkMode = readBool(j, "benchmarkMode", s.benchmarkMode);
-    s.logLevel = readString(j, "logLevel", s.logLevel);
-    s.forceCompatibilityMode = readBool(j, "forceCompatibilityMode", s.forceCompatibilityMode);
-
-    s.sanitise();
-    return s;
+DiagnosticsSettings DiagnosticsSettings::fromJson(const Json& j) {
+    DiagnosticsSettings d;
+    if (!j.isObject()) return d;
+    d.overlay = readBool(j, "overlay", d.overlay);
+    d.debugView = readBool(j, "debugView", d.debugView);
+    d.benchmarkMode = readBool(j, "benchmarkMode", d.benchmarkMode);
+    d.logLevel = readString(j, "logLevel", d.logLevel);
+    d.forceCompatibilityMode = readBool(j, "forceCompatibilityMode", d.forceCompatibilityMode);
+    d.sanitise();
+    return d;
 }
 
-void Settings::sanitise() {
-    sharpness = clampValue(sharpness, 0.0f, 1.0f);
-    // 1.0 = native, 3.0 = FSR's ultra-performance ratio. Expressed as a scale
-    // factor here (render = display / scale), so the legal range is [1, 3].
-    customUpscaleRatio = clampValue(customUpscaleRatio, 1.0f, 3.0f);
-    motionVectorScaleX = clampValue(motionVectorScaleX, -8192.0f, 8192.0f);
-    motionVectorScaleY = clampValue(motionVectorScaleY, -8192.0f, 8192.0f);
-
-    // Safe mode is a hard override: it exists because the previous session did
-    // not survive, so nothing else in the file gets a vote.
-    if (safeMode) {
-        enabled = false;
-        upscaler = UpscalerSelection::Disabled;
-        frameGeneration = FrameGenSelection::Disabled;
-        antiLag2 = false;
-    }
-
-    if (!enabled) {
-        upscaler = UpscalerSelection::Disabled;
-        frameGeneration = FrameGenSelection::Disabled;
-    }
-
-    // Compatibility mode trades performance for the widest chance of working.
-    if (forceCompatibilityMode) {
-        frameGenAsyncCompute = false;
-        upscalerVersionId = "auto";
-        frameGenVersionId = "auto";
-    }
-
-    if (upscalerVersionId.empty()) upscalerVersionId = "auto";
-    if (frameGenVersionId.empty()) frameGenVersionId = "auto";
+void DiagnosticsSettings::sanitise() {
     if (logLevel.empty()) logLevel = "info";
 }
 
-bool Settings::operator==(const Settings& o) const {
-    return enabled == o.enabled && safeMode == o.safeMode &&
-           upscaler == o.upscaler && upscalerVersionId == o.upscalerVersionId &&
-           quality == o.quality && customUpscaleRatio == o.customUpscaleRatio &&
-           sharpeningEnabled == o.sharpeningEnabled && sharpness == o.sharpness &&
-           frameGeneration == o.frameGeneration && frameGenVersionId == o.frameGenVersionId &&
-           frameGenAsyncCompute == o.frameGenAsyncCompute &&
-           frameGenUiComposition == o.frameGenUiComposition &&
-           antiLag2 == o.antiLag2 && depthConvention == o.depthConvention &&
-           depthInfinite == o.depthInfinite &&
-           motionVectorScaleX == o.motionVectorScaleX &&
-           motionVectorScaleY == o.motionVectorScaleY &&
-           motionVectorFlipY == o.motionVectorFlipY &&
-           motionVectorsAreUvSpace == o.motionVectorsAreUvSpace &&
-           debugOverlay == o.debugOverlay && debugView == o.debugView &&
+bool DiagnosticsSettings::operator==(const DiagnosticsSettings& o) const {
+    return overlay == o.overlay && debugView == o.debugView &&
            benchmarkMode == o.benchmarkMode && logLevel == o.logLevel &&
            forceCompatibilityMode == o.forceCompatibilityMode;
 }
 
 // ---------------------------------------------------------------------------
+// FrameGenSettings
+// ---------------------------------------------------------------------------
 
-SettingsStore::SettingsStore(std::string path) : path_(std::move(path)) {}
+Json FrameGenSettings::toJson() const {
+    Json j = Json::object();
+    j.set("schemaVersion", Json(1));
+    j.set("module", Json("framegen"));
+    j.set("enabled", Json(enabled));
+    j.set("safeMode", Json(safeMode));
+    j.set("implementation", Json(std::string(toString(implementation))));
+    j.set("versionId", Json(versionId));
+    j.set("asyncCompute", Json(asyncCompute));
+    j.set("uiComposition", Json(uiComposition));
+    j.set("antiLag2", Json(antiLag2));
+    j.set("antiLagMaxFps", Json(static_cast<unsigned long long>(antiLagMaxFps)));
+    j.set("calibration", calibration.toJson());
+    j.set("diagnostics", diagnostics.toJson());
+    return j;
+}
 
-Settings SettingsStore::load(std::string* diagnostic) const {
+FrameGenSettings FrameGenSettings::fromJson(const Json& j) {
+    FrameGenSettings s;
+    if (!j.isObject()) return s;
+
+    s.enabled = readBool(j, "enabled", s.enabled);
+    s.safeMode = readBool(j, "safeMode", s.safeMode);
+    s.implementation = frameGenSelectionFromString(
+        readString(j, "implementation", toString(s.implementation)), s.implementation);
+    s.versionId = readString(j, "versionId", s.versionId);
+    s.asyncCompute = readBool(j, "asyncCompute", s.asyncCompute);
+    s.uiComposition = readBool(j, "uiComposition", s.uiComposition);
+    s.antiLag2 = readBool(j, "antiLag2", s.antiLag2);
+    s.antiLagMaxFps = readUint(j, "antiLagMaxFps", s.antiLagMaxFps);
+    s.calibration = RenderCalibration::fromJson(j["calibration"]);
+    s.diagnostics = DiagnosticsSettings::fromJson(j["diagnostics"]);
+    s.sanitise();
+    return s;
+}
+
+void FrameGenSettings::sanitise() {
+    calibration.sanitise();
+    diagnostics.sanitise();
+
+    // A frame cap below this is not a latency tool, it is a broken setting.
+    if (antiLagMaxFps != 0) antiLagMaxFps = clampValue<uint32_t>(antiLagMaxFps, 20u, 1000u);
+
+    // Safe mode switches the product off, and that is all it does to the
+    // document. It deliberately does not clear the implementation choice, the
+    // version pin or the Anti-Lag preference: the planner already refuses to
+    // act while safe mode is set, so overwriting them would only destroy the
+    // user's configuration and make clearing safe mode a re-setup exercise.
+    if (safeMode) enabled = false;
+
+    // Compatibility mode is likewise honoured by the planner rather than baked
+    // into the document, so turning it off restores the pinned version and
+    // async compute instead of silently having lost them.
+
+    if (versionId.empty()) versionId = "auto";
+}
+
+bool FrameGenSettings::operator==(const FrameGenSettings& o) const {
+    return enabled == o.enabled && safeMode == o.safeMode &&
+           implementation == o.implementation && versionId == o.versionId &&
+           asyncCompute == o.asyncCompute && uiComposition == o.uiComposition &&
+           antiLag2 == o.antiLag2 && antiLagMaxFps == o.antiLagMaxFps &&
+           calibration == o.calibration && diagnostics == o.diagnostics;
+}
+
+// ---------------------------------------------------------------------------
+// UpscaleSettings
+// ---------------------------------------------------------------------------
+
+Json UpscaleSettings::toJson() const {
+    Json j = Json::object();
+    j.set("schemaVersion", Json(1));
+    j.set("module", Json("upscaling"));
+    j.set("enabled", Json(enabled));
+    j.set("safeMode", Json(safeMode));
+    j.set("implementation", Json(std::string(toString(implementation))));
+    j.set("versionId", Json(versionId));
+    j.set("quality", Json(std::string(toString(quality))));
+    j.set("customUpscaleRatio", Json(static_cast<double>(customUpscaleRatio)));
+    j.set("sharpeningEnabled", Json(sharpeningEnabled));
+    j.set("sharpness", Json(static_cast<double>(sharpness)));
+    j.set("calibration", calibration.toJson());
+    j.set("diagnostics", diagnostics.toJson());
+    return j;
+}
+
+UpscaleSettings UpscaleSettings::fromJson(const Json& j) {
+    UpscaleSettings s;
+    if (!j.isObject()) return s;
+
+    s.enabled = readBool(j, "enabled", s.enabled);
+    s.safeMode = readBool(j, "safeMode", s.safeMode);
+    s.implementation = upscalerSelectionFromString(
+        readString(j, "implementation", toString(s.implementation)), s.implementation);
+    s.versionId = readString(j, "versionId", s.versionId);
+    s.quality = qualityModeFromString(readString(j, "quality", toString(s.quality)), s.quality);
+    s.customUpscaleRatio = readFloat(j, "customUpscaleRatio", s.customUpscaleRatio);
+    s.sharpeningEnabled = readBool(j, "sharpeningEnabled", s.sharpeningEnabled);
+    s.sharpness = readFloat(j, "sharpness", s.sharpness);
+    s.calibration = RenderCalibration::fromJson(j["calibration"]);
+    s.diagnostics = DiagnosticsSettings::fromJson(j["diagnostics"]);
+    s.sanitise();
+    return s;
+}
+
+void UpscaleSettings::sanitise() {
+    calibration.sanitise();
+    diagnostics.sanitise();
+
+    sharpness = clampValue(sharpness, 0.0f, 1.0f);
+    // 1.0 is native, 3.0 matches AMD's ultra-performance ratio.
+    customUpscaleRatio = clampValue(customUpscaleRatio, 1.0f, 3.0f);
+
+    // Same rule as frame generation: safe mode switches the product off without
+    // discarding the settings behind it.
+    if (safeMode) enabled = false;
+
+    if (versionId.empty()) versionId = "auto";
+}
+
+bool UpscaleSettings::operator==(const UpscaleSettings& o) const {
+    return enabled == o.enabled && safeMode == o.safeMode &&
+           implementation == o.implementation && versionId == o.versionId &&
+           quality == o.quality && customUpscaleRatio == o.customUpscaleRatio &&
+           sharpeningEnabled == o.sharpeningEnabled && sharpness == o.sharpness &&
+           calibration == o.calibration && diagnostics == o.diagnostics;
+}
+
+// ---------------------------------------------------------------------------
+// SettingsStore
+// ---------------------------------------------------------------------------
+
+template <typename T>
+T SettingsStore<T>::load(std::string* diagnostic) const {
     if (diagnostic) diagnostic->clear();
 
     std::ifstream in(path_, std::ios::binary);
     if (!in) {
         if (diagnostic) *diagnostic = "no settings file at '" + path_ + "'; using defaults";
-        return Settings{};
+        return T{};
     }
 
     std::ostringstream ss;
     ss << in.rdbuf();
-    const std::string text = ss.str();
 
     std::string parseError;
-    const Json j = Json::parse(text, &parseError);
+    const Json j = Json::parse(ss.str(), &parseError);
     if (j.isNull()) {
         if (diagnostic)
             *diagnostic = "settings file is not valid JSON (" + parseError + "); using defaults";
-        return Settings{};
+        return T{};
     }
-
-    return Settings::fromJson(j);
+    return T::fromJson(j);
 }
 
-bool SettingsStore::save(const Settings& settings, std::string* diagnostic) const {
+template <typename T>
+bool SettingsStore<T>::save(const T& settings, std::string* diagnostic) const {
     if (diagnostic) diagnostic->clear();
 
     const std::string tmp = path_ + ".tmp";
@@ -306,5 +398,8 @@ bool SettingsStore::save(const Settings& settings, std::string* diagnostic) cons
     }
     return true;
 }
+
+template class SettingsStore<FrameGenSettings>;
+template class SettingsStore<UpscaleSettings>;
 
 } // namespace bfsr

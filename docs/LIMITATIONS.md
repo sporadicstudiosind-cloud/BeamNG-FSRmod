@@ -130,7 +130,22 @@ is written so someone with the hardware can execute it.
 
 Fabricating those results would have been worse than not having them.
 
-## 10. Legal posture
+## 10. Mod archive layout is partly unverified
+
+BeamNG's packing rules state a mod ZIP's root "must contain only top-level
+folders" and list `vehicles`, `levels`, `art`, `assets`, `lua`, `scripts`, `ui`,
+`gameplay`, `settings`, `trackEditor`, `vehicleGroups`. Both archives comply for
+`lua/` and `ui/`, and neither contains a loose root file.
+
+`shaders/` is **not** on that list. The beacon's HLSL lives there because that
+mirrors the engine's own tree and is where a `ShaderData` path resolves from, and
+because BeamNG's PostFX documentation references shaders by that kind of path.
+It has not been verified that BeamNG mounts a `shaders/` folder from a mod
+archive. If it does not, the beacon fails to create, the bridge reports the
+render inputs as unavailable, and both products stay off — visibly, with a
+reason, rather than silently.
+
+## 11. Legal posture
 
 Injecting any DLL into BeamNG's process is not something BeamNG has explicitly
 blessed. This project's reading of the EULA — that its prohibition targets

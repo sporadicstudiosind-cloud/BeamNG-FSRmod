@@ -17,12 +17,21 @@ namespace bfsr {
 /// The mod half reads and writes the same IPC files through Lua's file API.
 struct BridgePaths {
     std::string bridgeDirectory;
-    std::string settingsFile;
+    std::string baseDirectory;      ///< bridgeDirectory + "beamng_fsr\\"
+    std::string modulesDirectory;   ///< where each product drops its manifest
     std::string logFile;
-    std::string ipcRequestFile;   ///< mod half -> bridge
-    std::string ipcStatusFile;    ///< bridge -> mod half
     std::string crashSentinelFile;
     std::string benchmarkDirectory;
+
+    // One settings document and one IPC channel per product, so either can be
+    // installed, configured and removed without touching the other's state.
+    std::string frameGenSettingsFile;
+    std::string frameGenRequestFile;
+    std::string frameGenStatusFile;
+
+    std::string upscaleSettingsFile;
+    std::string upscaleRequestFile;
+    std::string upscaleStatusFile;
 };
 
 #if defined(_WIN32)

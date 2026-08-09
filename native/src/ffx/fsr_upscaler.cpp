@@ -12,7 +12,7 @@ namespace {
 
 /// Builds the creation-time flag set. These are baked into the context, which
 /// is why changing any of them forces a recreate.
-uint32_t buildCreateFlags(const Settings& settings, bool colourIsHdr) {
+uint32_t buildCreateFlags(const UpscaleSettings& settings, bool colourIsHdr) {
     uint32_t flags = 0;
 
     if (colourIsHdr) flags |= FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE;
@@ -25,16 +25,16 @@ uint32_t buildCreateFlags(const Settings& settings, bool colourIsHdr) {
     // resolves to reversed-Z, which is the modern default and what the beacon
     // shader's projParams inspection is expected to confirm; the user can
     // override it and the choice is logged.
-    const bool reversedZ = settings.depthConvention != DepthConvention::StandardZ;
+    const bool reversedZ = settings.calibration.depthConvention != DepthConvention::StandardZ;
     if (reversedZ) flags |= FFX_UPSCALE_ENABLE_DEPTH_INVERTED;
-    if (settings.depthInfinite) flags |= FFX_UPSCALE_ENABLE_DEPTH_INFINITE;
+    if (settings.calibration.depthInfinite) flags |= FFX_UPSCALE_ENABLE_DEPTH_INFINITE;
 
     // No exposure texture is produced by the mod half today, so let FSR derive
     // it. This is a documented, supported mode rather than a workaround.
     flags |= FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
 
-    if (settings.debugView) flags |= FFX_UPSCALE_ENABLE_DEBUG_VISUALIZATION;
-    if (settings.logLevel == "trace" || settings.logLevel == "debug") {
+    if (settings.diagnostics.debugView) flags |= FFX_UPSCALE_ENABLE_DEBUG_VISUALIZATION;
+    if (settings.diagnostics.logLevel == "trace" || settings.diagnostics.logLevel == "debug") {
         flags |= FFX_UPSCALE_ENABLE_DEBUG_CHECKING;
     }
     return flags;
@@ -57,8 +57,8 @@ void ffxUpscalerMessage(uint32_t type, const wchar_t* message) {
 
 FsrUpscaler::~FsrUpscaler() { destroy(); }
 
-bool FsrUpscaler::needsRecreate(const ResolvedPlan& plan,
-                                const Settings& settings,
+bool FsrUpscaler::needsRecreate(const UpscalePlan& plan,
+                                const UpscaleSettings& settings,
                                 bool colourIsHdr) const noexcept {
     if (!context_) return true;
     if (buildCreateFlags(settings, colourIsHdr) != createFlags_) return true;
@@ -68,14 +68,14 @@ bool FsrUpscaler::needsRecreate(const ResolvedPlan& plan,
     if (plan.renderSize.width > maxRenderSize_.width ||
         plan.renderSize.height > maxRenderSize_.height) return true;
     if (plan.upscaleSize != maxUpscaleSize_) return true;
-    if (plan.upscalerVersionId != versionId_) return true;
+    if (plan.versionId != versionId_) return true;
     return false;
 }
 
 Result FsrUpscaler::create(FfxLoader& loader,
                            ID3D12Device* device,
-                           const ResolvedPlan& plan,
-                           const Settings& settings,
+                           const UpscalePlan& plan,
+                           const UpscaleSettings& settings,
                            bool colourIsHdr) {
     destroy();
 
@@ -119,12 +119,12 @@ Result FsrUpscaler::create(FfxLoader& loader,
     ffxOverrideVersion overrideDesc{};
     overrideDesc.header.type = FFX_API_DESC_TYPE_OVERRIDE_VERSION;
     overrideDesc.header.pNext = nullptr;
-    overrideDesc.versionId = plan.upscalerVersionId;
+    overrideDesc.versionId = plan.versionId;
 
     // Chain: upscale -> version -> backend [-> override]
     createUpscale.header.pNext = &versionDesc.header;
     versionDesc.header.pNext = &backendDesc.header;
-    if (plan.upscalerVersionId != 0) {
+    if (plan.versionId != 0) {
         backendDesc.header.pNext = &overrideDesc.header;
     }
 
@@ -137,8 +137,8 @@ Result FsrUpscaler::create(FfxLoader& loader,
 
     loader_ = &loader;
     device_ = device;
-    versionId_ = plan.upscalerVersionId;
-    versionName_ = plan.upscalerVersionName;
+    versionId_ = plan.versionId;
+    versionName_ = plan.versionName;
 
     // Ask the runtime which provider it actually bound. When the plan did not
     // pin a version this is the only way to report the truth rather than a
@@ -172,7 +172,7 @@ void FsrUpscaler::destroy() {
     maxUpscaleSize_ = {};
 }
 
-Result FsrUpscaler::dispatch(const UpscaleFrameInputs& in, const Settings& settings) {
+Result FsrUpscaler::dispatch(const UpscaleFrameInputs& in, const UpscaleSettings& settings) {
     if (!context_ || !loader_) {
         return Result::fail(Status::NotInitialised, "the FSR upscaling context does not exist");
     }
@@ -209,11 +209,11 @@ Result FsrUpscaler::dispatch(const UpscaleFrameInputs& in, const Settings& setti
     // assumption. UV-space input is converted by scaling with the render size.
     float scaleX = in.motionVectorScaleX;
     float scaleY = in.motionVectorScaleY;
-    if (settings.motionVectorsAreUvSpace) {
+    if (settings.calibration.motionVectorsAreUvSpace) {
         scaleX *= static_cast<float>(in.renderSize.width);
         scaleY *= static_cast<float>(in.renderSize.height);
     }
-    if (settings.motionVectorFlipY) scaleY = -scaleY;
+    if (settings.calibration.motionVectorFlipY) scaleY = -scaleY;
     desc.motionVectorScale = {scaleX, scaleY};
 
     desc.renderSize = {in.renderSize.width, in.renderSize.height};
@@ -229,7 +229,7 @@ Result FsrUpscaler::dispatch(const UpscaleFrameInputs& in, const Settings& setti
     desc.viewSpaceToMetersFactor = in.viewSpaceToMetersFactor;
 
     desc.flags = 0;
-    if (settings.debugView) desc.flags |= FFX_UPSCALE_FLAG_DRAW_DEBUG_VIEW;
+    if (settings.diagnostics.debugView) desc.flags |= FFX_UPSCALE_FLAG_DRAW_DEBUG_VIEW;
 
     const ffxReturnCode_t rc = loader_->fn().Dispatch(&context_, &desc.header);
     return FfxLoader::fromFfx(rc, "dispatching FSR upscaling");

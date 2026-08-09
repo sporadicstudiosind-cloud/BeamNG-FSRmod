@@ -27,16 +27,24 @@ BridgePaths resolvePaths(HMODULE module) {
     p.bridgeDirectory = moduleDirectory(module);
     if (p.bridgeDirectory.empty()) p.bridgeDirectory = ".\\";
 
-    const std::string base = p.bridgeDirectory + "beamng_fsr\\";
-    CreateDirectoryA(base.c_str(), nullptr); // harmless if it already exists
+    p.baseDirectory = p.bridgeDirectory + "beamng_fsr\\";
+    CreateDirectoryA(p.baseDirectory.c_str(), nullptr); // harmless if it exists
 
-    p.settingsFile = base + "settings.json";
-    p.logFile = base + "bridge.log";
-    p.ipcRequestFile = base + "request.json";
-    p.ipcStatusFile = base + "status.json";
-    p.crashSentinelFile = base + "session.lock";
-    p.benchmarkDirectory = base + "benchmarks\\";
+    p.modulesDirectory = p.baseDirectory + "modules\\";
+    CreateDirectoryA(p.modulesDirectory.c_str(), nullptr);
+
+    p.logFile = p.baseDirectory + "bridge.log";
+    p.crashSentinelFile = p.baseDirectory + "session.lock";
+    p.benchmarkDirectory = p.baseDirectory + "benchmarks\\";
     CreateDirectoryA(p.benchmarkDirectory.c_str(), nullptr);
+
+    p.frameGenSettingsFile = p.baseDirectory + "framegen.settings.json";
+    p.frameGenRequestFile  = p.baseDirectory + "framegen.request.json";
+    p.frameGenStatusFile   = p.baseDirectory + "framegen.status.json";
+
+    p.upscaleSettingsFile  = p.baseDirectory + "upscaling.settings.json";
+    p.upscaleRequestFile   = p.baseDirectory + "upscaling.request.json";
+    p.upscaleStatusFile    = p.baseDirectory + "upscaling.status.json";
     return p;
 }
 

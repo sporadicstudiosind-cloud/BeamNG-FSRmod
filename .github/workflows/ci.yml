@@ -76,20 +76,25 @@ jobs:
 
       - name: Check Lua syntax
         run: |
-          for f in mod/lua/ge/extensions/fsr/*.lua; do
+          for f in $(find mods -name '*.lua'); do
             luajit -bl "$f" > /dev/null || { echo "syntax error in $f"; exit 1; }
             echo "ok  $f"
           done
 
       - name: Check UI JavaScript
-        run: node --check mod/ui/modules/apps/FsrSettings/app.js && echo "ok  app.js"
+        run: |
+          for f in $(find mods -name '*.js'); do
+            node --check "$f" || exit 1
+            echo "ok  $f"
+          done
 
       - name: Check JSON
         run: |
           python3 - <<'PY'
           import json, pathlib, sys
           bad = 0
-          for p in pathlib.Path('mod').rglob('*.json'):
+          for p in list(pathlib.Path('mods').rglob('*.json')) + \
+                   list(pathlib.Path('packaging').rglob('*.json')):
               try:
                   json.load(p.open())
                   print(f'ok  {p}')
@@ -98,5 +103,30 @@ jobs:
           sys.exit(1 if bad else 0)
           PY
 
-      - name: Build the mod archive
+      - name: Build both mod archives
         run: python3 tools/package.py --mod-only
+
+      # The two products must remain separately installable. Overlapping files
+      # have to be byte-identical or co-installing them silently breaks one.
+      - name: Verify the products can co-install
+        run: |
+          python3 - <<'PY'
+          import hashlib, sys, zipfile
+          fg = zipfile.ZipFile('dist/framegen/beamng_fsr_framegen.zip')
+          up = zipfile.ZipFile('dist/upscaling/beamng_fsr_upscaling.zip')
+
+          loose = [n for n in fg.namelist() + up.namelist() if '/' not in n]
+          if loose:
+              print('loose files at archive root (BeamNG forbids these):', loose)
+              sys.exit(1)
+
+          mismatched = [
+              n for n in set(fg.namelist()) & set(up.namelist())
+              if hashlib.sha256(fg.read(n)).hexdigest()
+              != hashlib.sha256(up.read(n)).hexdigest()
+          ]
+          if mismatched:
+              print('overlapping files differ between products:', mismatched)
+              sys.exit(1)
+          print('co-installation safe')
+          PY

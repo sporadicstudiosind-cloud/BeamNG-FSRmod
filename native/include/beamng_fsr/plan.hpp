@@ -1,5 +1,12 @@
 // SPDX-License-Identifier: MIT
 // Part of BeamNG FSR Bridge. See LICENSE at the repository root.
+//
+// Two independent planners, one per product.
+//
+// `resolveFrameGenPlan` and `resolveUpscalePlan` share no state and neither
+// consults the other's settings or result. That is what makes the two mods
+// separately installable: whichever is present plans for itself, and when both
+// are present they compose without either needing to know.
 #pragma once
 
 #include <cstdint>
@@ -28,11 +35,12 @@ struct Extent2D {
 /// installed DLLs — never hardcoded, so a newer AMD SDK adds options for free.
 struct FfxVersionEntry {
     uint64_t id = 0;
-    std::string name;        ///< AMD's display string, e.g. "FSR 3.1.5".
-    bool isMachineLearning = false; ///< Derived from the name; see classifyFfxVersion.
+    std::string name;
+    bool isMachineLearning = false;
 };
 
-/// Everything the planner needs that is not a user preference.
+/// Everything the planners need that is not a user preference. Shared by both
+/// because it describes the machine, not either product.
 struct RuntimeContext {
     Extent2D displaySize;
     /// The resolution BeamNG is actually rendering its 3D scene at. Equal to
@@ -40,87 +48,122 @@ struct RuntimeContext {
     /// bridge cannot change this itself (FEASIBILITY §6.4).
     Extent2D sceneRenderSize;
     uint64_t availableVramBytes = 0;
-    /// Bytes the FSR runtime reported it needs, via
-    /// ffxQueryDescUpscaleGetGPUMemoryUsageV2 / the frame-generation equivalent.
-    /// Zero means "not yet queried", which the planner treats as unknown rather
-    /// than as zero cost.
+    /// Reported by AMD's own GetGPUMemoryUsageV2 queries. Zero means "not
+    /// measured", which the planners treat as unknown rather than as zero cost.
     uint64_t estimatedUpscalerVramBytes = 0;
     uint64_t estimatedFrameGenVramBytes = 0;
-    /// True once the mod half's beacon (or the heuristic fallback) has produced
-    /// usable depth and motion vectors. Without both, nothing temporal can run.
+
     bool frameInputsAvailable = false;
     bool motionVectorsAvailable = false;
     bool depthAvailable = false;
-    /// Always false today: BeamNG exposes no projection-jitter hook.
-    /// Kept as a field so the planner's behaviour is testable for the day it changes.
+    /// Always false today: BeamNG exposes no projection-jitter hook. Kept as a
+    /// field so the planner's behaviour is testable for the day it changes.
     bool cameraJitterAvailable = false;
     /// Smoothed rendered (not displayed) frame rate; 0 when not yet measured.
     float measuredBaseFps = 0.0f;
+
     std::vector<FfxVersionEntry> upscalerVersions;
     std::vector<FfxVersionEntry> frameGenVersions;
 };
 
-enum class UpscalerBackend { None, Analytical, Ml };
-enum class FrameGenBackend { None, Analytical, Ml };
-
-const char* toString(UpscalerBackend b) noexcept;
-const char* toString(FrameGenBackend b) noexcept;
-
-/// The concrete configuration the runtime will actually execute, together with
-/// a human-readable justification for every decision. The UI shows these; the
-/// brief's requirement that unavailable options be *explained* rather than
-/// silently dropped is why the reasons are part of the plan, not log spam.
-struct ResolvedPlan {
-    UpscalerBackend upscaler = UpscalerBackend::None;
-    FrameGenBackend frameGen = FrameGenBackend::None;
-    bool antiLag2 = false;
-
-    uint64_t upscalerVersionId = 0; ///< 0 == let AMD choose the default provider.
-    uint64_t frameGenVersionId = 0;
-    std::string upscalerVersionName;
-    std::string frameGenVersionName;
-
-    QualityMode quality = QualityMode::Quality;
-    Extent2D renderSize;   ///< What FSR is told the inputs are.
-    Extent2D upscaleSize;  ///< What FSR outputs.
-    float sharpness = 0.5f;
-    bool sharpeningEnabled = true;
-
-    /// Non-fatal notes the user should see (e.g. the jitter limitation).
+/// Notes attached to a plan. Split by kind because the UI renders them
+/// differently: a downgrade is something the user asked for and did not get, a
+/// decision is Auto explaining itself, a warning applies to what is running.
+struct PlanNotes {
     std::vector<std::string> warnings;
-    /// Why each requested-but-not-granted feature was refused.
     std::vector<std::string> downgrades;
-    /// Why Auto picked what it picked.
     std::vector<std::string> decisions;
 
-    [[nodiscard]] bool anythingActive() const noexcept {
-        return upscaler != UpscalerBackend::None || frameGen != FrameGenBackend::None;
+    [[nodiscard]] bool empty() const noexcept {
+        return warnings.empty() && downgrades.empty() && decisions.empty();
     }
+};
+
+// ---------------------------------------------------------------------------
+// Frame generation
+// ---------------------------------------------------------------------------
+
+enum class FrameGenBackend { None, Analytical, Ml };
+const char* toString(FrameGenBackend b) noexcept;
+
+/// AMD's documented minimum rendered frame rate below which generated frames
+/// "may result in visual artifacts severe enough to negatively impact the user
+/// experience" (FSR SDK 2.3.0, frame-interpolation-swap-chain.md). These are
+/// AMD's numbers, per implementation — not a heuristic invented here.
+constexpr float kAmdMinBaseFpsAnalytical = 60.0f; ///< FSR-SRFG 3.1.6
+constexpr float kAmdMinBaseFpsMl = 30.0f;         ///< FSR-FG 4.0.1
+
+float amdRecommendedMinimumBaseFps(FrameGenBackend backend) noexcept;
+
+struct FrameGenPlan {
+    FrameGenBackend backend = FrameGenBackend::None;
+    bool antiLag2 = false;
+    uint32_t antiLagMaxFps = 0;
+    bool asyncCompute = true;
+    bool uiComposition = true;
+
+    uint64_t versionId = 0; ///< 0 == let AMD choose the default provider.
+    std::string versionName;
+
+    Extent2D displaySize;
+    PlanNotes notes;
+
+    [[nodiscard]] bool active() const noexcept { return backend != FrameGenBackend::None; }
     [[nodiscard]] Json toJson() const;
 };
 
+FrameGenPlan resolveFrameGenPlan(const FrameGenSettings& settings,
+                                 const CapabilitySet& caps,
+                                 const RuntimeContext& ctx);
+
+// ---------------------------------------------------------------------------
+// Upscaling
+// ---------------------------------------------------------------------------
+
+enum class UpscalerBackend { None, Analytical, Ml };
+const char* toString(UpscalerBackend b) noexcept;
+
+struct UpscalePlan {
+    UpscalerBackend backend = UpscalerBackend::None;
+
+    uint64_t versionId = 0;
+    std::string versionName;
+
+    QualityMode quality = QualityMode::Quality;
+    Extent2D renderSize;  ///< What FSR is told the inputs are.
+    Extent2D upscaleSize; ///< What FSR outputs.
+    float sharpness = 0.5f;
+    bool sharpeningEnabled = true;
+
+    PlanNotes notes;
+
+    [[nodiscard]] bool active() const noexcept { return backend != UpscalerBackend::None; }
+    [[nodiscard]] Json toJson() const;
+};
+
+UpscalePlan resolveUpscalePlan(const UpscaleSettings& settings,
+                               const CapabilitySet& caps,
+                               const RuntimeContext& ctx);
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
 /// Classifies an AMD version string as ML or analytical.
 ///
-/// AMD does not expose a machine-readable "is ML" flag on the version query, so
-/// this parses the display name: FSR *Upscaling* 4.x and FSR *Frame Generation*
-/// 4.x are the ML implementations, 3.1.x/2.x are analytical (FEASIBILITY §4.1).
-/// Unrecognised names default to analytical, i.e. the conservative answer.
+/// AMD exposes no machine-readable "is ML" flag on the version query, so this
+/// parses the display name: the 4.x lines of both the upscaler and frame
+/// generation are the ML implementations. Unrecognised names default to
+/// analytical, the conservative answer.
 bool classifyFfxVersionAsMl(const std::string& versionName) noexcept;
 
-/// Computes render resolution from an output size and a quality mode.
-/// Mirrors AMD's per-dimension ratios and rounds the way the SDK does.
-Extent2D renderSizeForQuality(Extent2D output, QualityMode mode, float customScale) noexcept;
+/// Computes render resolution from an output size and a quality mode, mirroring
+/// AMD's per-dimension ratios.
+Extent2D renderSizeForQuality(Extent2D output, QualityMode mode, float customRatio) noexcept;
 
-/// Picks a quality preset for Auto based on output resolution.
-/// This is *this project's* heuristic, not an AMD recommendation, and is
-/// labelled as such wherever it surfaces.
+/// Picks a quality preset for Auto based on output resolution. This is *this
+/// project's* heuristic, not an AMD recommendation, and is labelled as such
+/// wherever it surfaces.
 QualityMode autoQualityForResolution(Extent2D output) noexcept;
-
-/// The planner. Pure and deterministic: same inputs, same plan. All the
-/// interesting failure behaviour of the mod is decided here, which is why it is
-/// isolated from every platform API and covered by unit tests.
-ResolvedPlan resolvePlan(const Settings& settings,
-                         const CapabilitySet& caps,
-                         const RuntimeContext& ctx);
 
 } // namespace bfsr

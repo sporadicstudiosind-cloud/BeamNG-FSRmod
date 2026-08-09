@@ -36,6 +36,7 @@ add_library(bfsr_core STATIC
     src/ipc/ipc_protocol.cpp
     src/diag/statistics.cpp
     src/d3d12/beacon_signature.cpp
+    src/modules/module_registry.cpp
 )
 target_include_directories(bfsr_core PUBLIC include)
 set_target_properties(bfsr_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -132,6 +133,7 @@ if(BFSR_BUILD_TESTS)
         tests/test_ipc_protocol.cpp
         tests/test_statistics.cpp
         tests/test_beacon_signature.cpp
+        tests/test_modules.cpp
     )
     target_link_libraries(bfsr_tests PRIVATE bfsr_core)
     target_include_directories(bfsr_tests PRIVATE tests include)

@@ -2,22 +2,18 @@
 // Part of BeamNG FSR Bridge. See LICENSE at the repository root.
 #include "beamng_fsr/file_ipc.hpp"
 
-#include "beamng_fsr/logging.hpp"
-
 #include <cstdio>
 #include <fstream>
 #include <sstream>
 
 namespace bfsr {
 
-FileIpc::FileIpc(std::string requestPath, std::string statusPath)
-    : requestPath_(std::move(requestPath)), statusPath_(std::move(statusPath)) {}
-
-bool FileIpc::readRequest(IpcRequest& out, std::string* diagnostic) {
+template <typename RequestT, typename StatusT>
+bool FileIpcChannel<RequestT, StatusT>::readRequest(RequestT& out, std::string* diagnostic) {
     if (diagnostic) diagnostic->clear();
 
     std::ifstream in(requestPath_, std::ios::binary);
-    if (!in) return false; // The mod half has not written anything yet.
+    if (!in) return false; // This product's mod half has not written anything.
 
     std::ostringstream ss;
     ss << in.rdbuf();
@@ -25,24 +21,20 @@ bool FileIpc::readRequest(IpcRequest& out, std::string* diagnostic) {
     std::string parseError;
     const Json j = Json::parse(ss.str(), &parseError);
     if (j.isNull()) {
-        // Almost always a read that raced the mod half's rename. Silently wait
-        // for the next tick rather than reverting to defaults.
+        // Almost always a read that raced the mod half's rename. Wait for the
+        // next tick rather than reverting to defaults.
         if (diagnostic) *diagnostic = "request document is not valid JSON: " + parseError;
         return false;
     }
 
-    const IpcRequest request = IpcRequest::fromJson(j);
+    const RequestT request = RequestT::fromJson(j);
     if (!isProtocolCompatible(request.protocolVersion)) {
-        if (!warnedAboutProtocol_) {
-            warnedAboutProtocol_ = true;
-            BFSR_LOG_ERROR("the BeamNG FSR mod speaks IPC protocol version %d but this bridge "
-                           "speaks %d. Update both halves to the same release; the bridge is "
-                           "ignoring its requests until then.",
-                           request.protocolVersion, kIpcProtocolVersion);
-        }
+        protocolMismatch_ = true;
+        mismatchedVersion_ = request.protocolVersion;
         if (diagnostic) *diagnostic = "incompatible IPC protocol version";
         return false;
     }
+    protocolMismatch_ = false;
 
     if (request.sequence == lastSequence_) return false; // nothing new
     lastSequence_ = request.sequence;
@@ -50,8 +42,9 @@ bool FileIpc::readRequest(IpcRequest& out, std::string* diagnostic) {
     return true;
 }
 
-bool FileIpc::writeStatus(const IpcStatus& status) {
-    IpcStatus copy = status;
+template <typename RequestT, typename StatusT>
+bool FileIpcChannel<RequestT, StatusT>::writeStatus(const StatusT& status) {
+    StatusT copy = status;
     copy.sequence = ++statusSequence_;
 
     const std::string tmp = statusPath_ + ".tmp";
@@ -68,5 +61,8 @@ bool FileIpc::writeStatus(const IpcStatus& status) {
     }
     return true;
 }
+
+template class FileIpcChannel<FrameGenRequest, FrameGenStatus>;
+template class FileIpcChannel<UpscaleRequest, UpscaleStatus>;
 
 } // namespace bfsr

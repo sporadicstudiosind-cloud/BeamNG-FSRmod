@@ -1,0 +1,12 @@
+{
+  "beamng_fsr_upscaling": {
+    "modname": "beamng_fsr_upscaling",
+    "title": "AMD FSR Upscaling",
+    "authors": "BeamNG FSR Bridge contributors",
+    "tagline": "AMD FSR upscaling for BeamNG.drive",
+    "description": "Adds AMD FSR upscaling to BeamNG.drive's Direct3D 12 renderer, with ML upscaling on RX 9000 and RX 7000 hardware and analytical FSR 3.1.x on everything else that qualifies. Works entirely on its own — the separate AMD FSR Frame Generation product is optional and neither requires the other. Read the known limitations first: BeamNG exposes no camera-jitter hook, so FSR runs without the sub-pixel jitter its temporal upscaler is designed around. This mod ZIP is only half of the integration; the upscaling itself runs in a native bridge installed alongside BeamNG.drive.exe. See docs/INSTALL.md.",
+    "version": "0.2.0",
+    "license": "MIT (mod). AMD FSR runtime redistributed under AMD's own licence — see THIRD_PARTY_NOTICES.md.",
+    "requirements": "Windows 10/11, BeamNG.drive with the Direct3D 12 renderer, the native FSR bridge installed"
+  }
+}

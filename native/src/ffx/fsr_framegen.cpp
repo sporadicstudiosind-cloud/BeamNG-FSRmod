@@ -11,23 +11,23 @@
 namespace bfsr {
 namespace {
 
-uint32_t buildFrameGenCreateFlags(const Settings& settings) {
+uint32_t buildFrameGenCreateFlags(const FrameGenSettings& settings) {
     uint32_t flags = 0;
-    if (settings.frameGenAsyncCompute) {
+    if (settings.asyncCompute) {
         flags |= FFX_FRAMEGENERATION_ENABLE_ASYNC_WORKLOAD_SUPPORT;
     }
-    const bool reversedZ = settings.depthConvention != DepthConvention::StandardZ;
+    const bool reversedZ = settings.calibration.depthConvention != DepthConvention::StandardZ;
     if (reversedZ) flags |= FFX_FRAMEGENERATION_ENABLE_DEPTH_INVERTED;
-    if (settings.depthInfinite) flags |= FFX_FRAMEGENERATION_ENABLE_DEPTH_INFINITE;
-    if (settings.logLevel == "trace" || settings.logLevel == "debug") {
+    if (settings.calibration.depthInfinite) flags |= FFX_FRAMEGENERATION_ENABLE_DEPTH_INFINITE;
+    if (settings.diagnostics.logLevel == "trace" || settings.diagnostics.logLevel == "debug") {
         flags |= FFX_FRAMEGENERATION_ENABLE_DEBUG_CHECKING;
     }
     return flags;
 }
 
-uint32_t buildFrameGenDispatchFlags(const Settings& settings) {
+uint32_t buildFrameGenDispatchFlags(const FrameGenSettings& settings) {
     uint32_t flags = 0;
-    if (settings.debugView) flags |= FFX_FRAMEGENERATION_FLAG_DRAW_DEBUG_VIEW;
+    if (settings.diagnostics.debugView) flags |= FFX_FRAMEGENERATION_FLAG_DRAW_DEBUG_VIEW;
     return flags;
 }
 
@@ -50,6 +50,10 @@ ffxReturnCode_t FsrFrameGenerator::dispatchCallback(ffxDispatchDescFrameGenerati
     const ffxReturnCode_t rc = self->loader_->fn().Dispatch(&self->context_, &params->header);
     if (rc == FFX_API_RETURN_OK) {
         self->generatedFrames_ += params->numGeneratedFrames;
+        // Observed, not requested: the swapchain decides this and hands it to
+        // us. Recording it is how the UI can report the real multiplier
+        // instead of claiming one.
+        self->observedGeneratedPerFrame_ = params->numGeneratedFrames;
     }
     return rc;
 }
@@ -120,23 +124,24 @@ void FsrFrameGenerator::unwrapSwapChain() {
     BFSR_LOG_INFO("frame-generation swapchain released");
 }
 
-bool FsrFrameGenerator::needsRecreate(const ResolvedPlan& plan,
-                                      const Settings& settings,
+bool FsrFrameGenerator::needsRecreate(const FrameGenPlan& plan,
+                                      const FrameGenSettings& settings,
                                       DXGI_FORMAT backBufferFormat) const noexcept {
     if (!context_) return true;
     if (buildFrameGenCreateFlags(settings) != createFlags_) return true;
-    if (plan.upscaleSize != displaySize_) return true;
-    if (plan.renderSize.width > maxRenderSize_.width ||
-        plan.renderSize.height > maxRenderSize_.height) return true;
+    if (plan.displaySize != displaySize_) return true;
+    // Frame generation consumes depth and motion vectors at whatever
+    // resolution the scene was rendered. Sizing for the display resolution
+    // covers every case, so only a display change forces a rebuild.
     if (backBufferFormat != backBufferFormat_) return true;
-    if (plan.frameGenVersionId != versionId_) return true;
+    if (plan.versionId != versionId_) return true;
     return false;
 }
 
 Result FsrFrameGenerator::createContext(FfxLoader& loader,
                                         ID3D12Device* device,
-                                        const ResolvedPlan& plan,
-                                        const Settings& settings,
+                                        const FrameGenPlan& plan,
+                                        const FrameGenSettings& settings,
                                         DXGI_FORMAT backBufferFormat) {
     destroyContext();
 
@@ -144,16 +149,17 @@ Result FsrFrameGenerator::createContext(FfxLoader& loader,
         return Result::fail(Status::NotInitialised, "the AMD FSR runtime is not loaded");
     }
     if (!device) return Result::fail(Status::InvalidArgument, "no Direct3D 12 device");
-    if (!plan.upscaleSize.valid()) {
+    if (!plan.displaySize.valid()) {
         return Result::fail(Status::InvalidArgument, "output size is zero");
     }
 
     createFlags_ = buildFrameGenCreateFlags(settings);
-    displaySize_ = plan.upscaleSize;
-    // Interpolation consumes depth and motion vectors at whatever resolution
-    // the scene was rendered; size for the largest case so a quality change
-    // does not force a rebuild.
-    maxRenderSize_ = plan.upscaleSize;
+    displaySize_ = plan.displaySize;
+    // Sized for the display resolution: that is the upper bound on the
+    // resolution the scene can have been rendered at, so an upscaling quality
+    // change never forces a frame-generation rebuild. This is what keeps the
+    // two products independent at runtime as well as at install time.
+    maxRenderSize_ = plan.displaySize;
     backBufferFormat_ = backBufferFormat;
 
     ffxCreateContextDescFrameGeneration createDesc{};
@@ -177,11 +183,11 @@ Result FsrFrameGenerator::createContext(FfxLoader& loader,
     ffxOverrideVersion overrideDesc{};
     overrideDesc.header.type = FFX_API_DESC_TYPE_OVERRIDE_VERSION;
     overrideDesc.header.pNext = nullptr;
-    overrideDesc.versionId = plan.frameGenVersionId;
+    overrideDesc.versionId = plan.versionId;
 
     createDesc.header.pNext = &versionDesc.header;
     versionDesc.header.pNext = &backendDesc.header;
-    if (plan.frameGenVersionId != 0) {
+    if (plan.versionId != 0) {
         backendDesc.header.pNext = &overrideDesc.header;
     }
 
@@ -192,8 +198,8 @@ Result FsrFrameGenerator::createContext(FfxLoader& loader,
     }
 
     loader_ = &loader;
-    versionId_ = plan.frameGenVersionId;
-    versionName_ = plan.frameGenVersionName;
+    versionId_ = plan.versionId;
+    versionName_ = plan.versionName;
 
     ffxQueryGetProviderVersion providerQuery{};
     providerQuery.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
@@ -234,7 +240,7 @@ void FsrFrameGenerator::destroyContext() {
 }
 
 Result FsrFrameGenerator::prepare(const FrameGenPrepareInputs& in,
-                                  const Settings& settings,
+                                  const FrameGenSettings& settings,
                                   uint64_t frameId) {
     if (!context_ || !loader_) {
         return Result::fail(Status::NotInitialised, "no frame-generation context");
@@ -256,11 +262,11 @@ Result FsrFrameGenerator::prepare(const FrameGenPrepareInputs& in,
 
     float scaleX = in.motionVectorScaleX;
     float scaleY = in.motionVectorScaleY;
-    if (settings.motionVectorsAreUvSpace) {
+    if (settings.calibration.motionVectorsAreUvSpace) {
         scaleX *= static_cast<float>(in.renderSize.width);
         scaleY *= static_cast<float>(in.renderSize.height);
     }
-    if (settings.motionVectorFlipY) scaleY = -scaleY;
+    if (settings.calibration.motionVectorFlipY) scaleY = -scaleY;
     desc.motionVectorScale = {scaleX, scaleY};
 
     desc.frameTimeDelta = in.frameTimeDeltaMs;
@@ -286,7 +292,7 @@ Result FsrFrameGenerator::prepare(const FrameGenPrepareInputs& in,
     return FfxLoader::fromFfx(rc, "preparing frame-generation inputs");
 }
 
-Result FsrFrameGenerator::configure(bool enabled, const Settings& settings, uint64_t frameId) {
+Result FsrFrameGenerator::configure(bool enabled, const FrameGenSettings& settings, uint64_t frameId) {
     if (!context_ || !loader_) {
         return Result::fail(Status::NotInitialised, "no frame-generation context");
     }
@@ -300,7 +306,7 @@ Result FsrFrameGenerator::configure(bool enabled, const Settings& settings, uint
     desc.frameGenerationCallback = &FsrFrameGenerator::dispatchCallback;
     desc.frameGenerationCallbackUserContext = this;
     desc.frameGenerationEnabled = enabled;
-    desc.allowAsyncWorkloads = enabled && settings.frameGenAsyncCompute;
+    desc.allowAsyncWorkloads = enabled && settings.asyncCompute;
     desc.HUDLessColor = FfxApiResource{};
     desc.flags = buildFrameGenDispatchFlags(settings);
     desc.onlyPresentGenerated = false;

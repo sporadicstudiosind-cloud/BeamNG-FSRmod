@@ -1,13 +1,19 @@
 // SPDX-License-Identifier: MIT
 // Part of BeamNG FSR Bridge. See LICENSE at the repository root.
 //
-// The bridge core: owns every subsystem and implements the C API the two proxy
-// stubs call into.
+// The shared runtime hosting one or both products.
 //
-// Failure policy, applied without exception throughout this file: BeamNG must
-// keep running. Every entry point catches everything, and every path that
-// cannot produce a correct result returns the unmodified object the game gave
-// us. FSR turning itself off is always preferable to a crash or a wrong image.
+// Both products ship the *same* binaries, so installing either or both never
+// conflicts over a file. What differs is the manifest each drops into
+// `beamng_fsr/modules/`. A feature is only started if its manifest is present,
+// which is what makes "separately installed and functional on its own" real:
+// with only the frame-generation manifest, no upscaling context is created, no
+// upscaling settings file is read, and no upscaling status is published.
+//
+// Failure policy, applied without exception: BeamNG must keep running. Every
+// exported entry point catches everything, and every path that cannot produce a
+// correct result returns the unmodified object the game gave us. A feature
+// turning itself off is always preferable to a crash or a wrong image.
 #include "beamng_fsr/bridge_api.h"  // BFSR_CORE_EXPORTS comes from the build
 
 #include "beamng_fsr/antilag2.hpp"
@@ -20,6 +26,7 @@
 #include "beamng_fsr/fsr_framegen.hpp"
 #include "beamng_fsr/fsr_upscaler.hpp"
 #include "beamng_fsr/logging.hpp"
+#include "beamng_fsr/module_registry.hpp"
 #include "beamng_fsr/paths.hpp"
 #include "beamng_fsr/plan.hpp"
 #include "beamng_fsr/resource_registry.hpp"
@@ -30,7 +37,7 @@
 #include <ffx_framegeneration.h>
 #include <ffx_upscale.h>
 
-#include <chrono>
+#include <memory>
 #include <mutex>
 
 #ifndef BFSR_VERSION_STRING
@@ -40,7 +47,31 @@
 namespace bfsr {
 namespace {
 
-/// Everything the bridge owns. One instance, created on first stub call.
+/// State for the frame-generation product. Constructed only when its manifest
+/// is present.
+struct FrameGenModule {
+    FrameGenSettings settings;
+    FrameGenPlan plan;
+    std::vector<FfxVersionEntry> versions;
+    std::unique_ptr<SettingsStore<FrameGenSettings>> store;
+    std::unique_ptr<FrameGenIpc> ipc;
+    FsrFrameGenerator generator;
+    AntiLag2 antiLag;
+    FrameGenerationGate gate;
+    uint64_t vramBytes = 0;
+};
+
+/// State for the upscaling product. Same contract.
+struct UpscaleModule {
+    UpscaleSettings settings;
+    UpscalePlan plan;
+    std::vector<FfxVersionEntry> versions;
+    std::unique_ptr<SettingsStore<UpscaleSettings>> store;
+    std::unique_ptr<UpscaleIpc> ipc;
+    FsrUpscaler upscaler;
+    uint64_t vramBytes = 0;
+};
+
 class BridgeRuntime {
 public:
     static BridgeRuntime& instance() {
@@ -59,28 +90,70 @@ public:
 
         BFSR_LOG_INFO("BeamNG FSR Bridge %s starting", BFSR_VERSION_STRING);
         BFSR_LOG_INFO("  bridge directory: %s", paths_.bridgeDirectory.c_str());
-        BFSR_LOG_INFO("  settings file:    %s", paths_.settingsFile.c_str());
 
-        settingsStore_ = std::make_unique<SettingsStore>(paths_.settingsFile);
-        std::string diagnostic;
-        settings_ = settingsStore_->load(&diagnostic);
-        if (!diagnostic.empty()) BFSR_LOG_INFO("settings: %s", diagnostic.c_str());
-        Logger::instance().setLevel(logLevelFromString(settings_.logLevel));
+        modules_.scan(paths_.modulesDirectory);
+        BFSR_LOG_INFO("Installed products:");
+        for (const auto& line : modules_.describe()) {
+            BFSR_LOG_INFO("  %s", line.c_str());
+        }
 
-        // The crash sentinel: a file written at startup and deleted on a clean
-        // shutdown. Finding one means the previous session died with the bridge
-        // loaded, so start disabled rather than repeat whatever killed it.
+        if (!modules_.anyPresent()) {
+            // The runtime binaries are present but neither product declared
+            // itself. Stay completely inert rather than guessing.
+            initFailure_ =
+                "Neither the frame generation nor the upscaling product is installed. "
+                "The bridge binaries are present but no module manifest was found in "
+                "beamng_fsr/modules/, so nothing was started. Reinstall whichever "
+                "product you want.";
+            BFSR_LOG_WARN("%s", initFailure_.c_str());
+        }
+
+        if (modules_.isPresent(ModuleId::FrameGeneration)) {
+            frameGen_ = std::make_unique<FrameGenModule>();
+            frameGen_->store = std::make_unique<SettingsStore<FrameGenSettings>>(
+                paths_.frameGenSettingsFile);
+            frameGen_->ipc = std::make_unique<FrameGenIpc>(paths_.frameGenRequestFile,
+                                                           paths_.frameGenStatusFile);
+            std::string diagnostic;
+            frameGen_->settings = frameGen_->store->load(&diagnostic);
+            if (!diagnostic.empty()) BFSR_LOG_INFO("frame generation settings: %s", diagnostic.c_str());
+        }
+
+        if (modules_.isPresent(ModuleId::Upscaling)) {
+            upscale_ = std::make_unique<UpscaleModule>();
+            upscale_->store = std::make_unique<SettingsStore<UpscaleSettings>>(
+                paths_.upscaleSettingsFile);
+            upscale_->ipc = std::make_unique<UpscaleIpc>(paths_.upscaleRequestFile,
+                                                          paths_.upscaleStatusFile);
+            std::string diagnostic;
+            upscale_->settings = upscale_->store->load(&diagnostic);
+            if (!diagnostic.empty()) BFSR_LOG_INFO("upscaling settings: %s", diagnostic.c_str());
+        }
+
+        applyLogLevel();
+
+        // The crash sentinel: written at startup, deleted on clean shutdown.
+        // Finding one means the previous session died with the bridge loaded,
+        // so start disabled rather than repeat whatever killed it. Safe mode is
+        // set on every installed product, because either could have been the
+        // cause and we cannot tell which.
         if (sentinelExists(paths_.crashSentinelFile)) {
             BFSR_LOG_WARN("the previous session did not shut down cleanly; entering safe "
-                          "mode. Clear it from the FSR settings panel once you have "
-                          "checked this log.");
-            settings_.safeMode = true;
-            settings_.sanitise();
-            settingsStore_->save(settings_);
+                          "mode. Clear it from the Advanced panel once you have checked "
+                          "this log.");
+            if (frameGen_) {
+                frameGen_->settings.safeMode = true;
+                frameGen_->settings.sanitise();
+                frameGen_->store->save(frameGen_->settings);
+            }
+            if (upscale_) {
+                upscale_->settings.safeMode = true;
+                upscale_->settings.sanitise();
+                upscale_->store->save(upscale_->settings);
+            }
         }
         writeSentinel(paths_.crashSentinelFile);
 
-        ipc_ = std::make_unique<FileIpc>(paths_.ipcRequestFile, paths_.ipcStatusFile);
         publishStatus();
     }
 
@@ -91,10 +164,12 @@ public:
 
         // Order matters: interpolation must stop before the swapchain that
         // drives it is released, and both before the runtime unloads.
-        frameGen_.destroyContext();
-        frameGen_.unwrapSwapChain();
-        upscaler_.destroy();
-        antiLag_.shutdown();
+        if (frameGen_) {
+            frameGen_->generator.destroyContext();
+            frameGen_->generator.unwrapSwapChain();
+            frameGen_->antiLag.shutdown();
+        }
+        if (upscale_) upscale_->upscaler.destroy();
         ffx_.unload();
 
         removeSentinel(paths_.crashSentinelFile);
@@ -105,6 +180,8 @@ public:
     void* wrapDevice(void* device, const IID* riid) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!device || !riid) return device;
+        if (!modules_.anyPresent()) return device; // nothing installed: stay out of the way
+
         // Only the base interface is wrapped; see device_proxy.cpp.
         if (*riid != __uuidof(ID3D12Device)) {
             BFSR_LOG_INFO("device created through an interface this build does not wrap; "
@@ -131,8 +208,11 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         if (!factory || !riid) return factory;
 
-        // Only a factory new enough to expose CreateSwapChainForHwnd is worth
-        // wrapping; a D3D12 renderer always has one.
+        // The swapchain is only worth intercepting for frame generation.
+        // Upscaling alone has no reason to replace the game's swapchain, so
+        // installing only that product leaves presentation completely untouched.
+        if (!modules_.isPresent(ModuleId::FrameGeneration)) return factory;
+
         IDXGIFactory7* real7 = nullptr;
         auto* unknown = static_cast<IUnknown*>(factory);
         if (FAILED(unknown->QueryInterface(__uuidof(IDXGIFactory7),
@@ -164,16 +244,32 @@ public:
         // Buffers the frame-generation context holds refer to the swapchain's
         // old surfaces. Tear down now; the next frame rebuilds against the new
         // size via the planner.
-        if (frameGen_.hasContext()) {
+        if (frameGen_ && frameGen_->generator.hasContext()) {
             BFSR_LOG_INFO("swapchain resize: releasing frame generation for rebuild");
-            frameGen_.destroyContext();
+            frameGen_->generator.destroyContext();
+            frameGen_->gate.reset();
         }
-        gate_.reset();
-        resolutionChanged_ = true;
+        if (upscale_ && upscale_->upscaler.isValid()) {
+            BFSR_LOG_INFO("swapchain resize: releasing the upscaler for rebuild");
+            upscale_->upscaler.destroy();
+        }
     }
 
 private:
     BridgeRuntime() = default;
+
+    void applyLogLevel() {
+        // Whichever product asks for the most detail wins: a user debugging one
+        // of them should not have to change the other's setting too.
+        LogLevel level = LogLevel::Info;
+        if (frameGen_) {
+            level = std::min(level, logLevelFromString(frameGen_->settings.diagnostics.logLevel));
+        }
+        if (upscale_) {
+            level = std::min(level, logLevelFromString(upscale_->settings.diagnostics.logLevel));
+        }
+        Logger::instance().setLevel(level);
+    }
 
     static IUnknown* onSwapChainCreated(IUnknown* swapChain, IUnknown* deviceOrQueue, void* ctx) {
         auto* self = static_cast<BridgeRuntime*>(ctx);
@@ -182,7 +278,7 @@ private:
 
     IUnknown* handleSwapChainCreated(IUnknown* swapChain, IUnknown* deviceOrQueue) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!swapChain) return nullptr;
+        if (!swapChain || !frameGen_) return nullptr;
 
         // For D3D12 the "device" argument to CreateSwapChainForHwnd is actually
         // the command queue, which is exactly what AMD's wrap descriptor wants.
@@ -196,7 +292,7 @@ private:
                           "generation is unavailable for it");
             return nullptr;
         }
-        gameQueue_ = queue; // reference retained for the lifetime of the swapchain
+        gameQueue_ = queue; // reference retained for the swapchain's lifetime
         gameSwapChain_ = swapChain;
         return nullptr;     // wrapping happens lazily, once a plan asks for it
     }
@@ -210,11 +306,17 @@ private:
         capabilities_ = evaluateCapabilities(gpu_, system_);
         logEnvironment(gpu_, system_, capabilities_);
 
-        // Load the AMD runtime only once something might actually use it.
-        if (!capabilities_.anyUpscaling() && !capabilities_.anyFrameGeneration()) {
-            initFailure_ = "no FSR feature is supported on this hardware and API "
-                           "combination; the bridge is inert.";
-            BFSR_LOG_INFO("%s", initFailure_.c_str());
+        // Only load the AMD runtime if an installed product could use it.
+        const bool needFrameGen = frameGen_ && capabilities_.anyFrameGeneration();
+        const bool needUpscale = upscale_ && capabilities_.anyUpscaling();
+        if (!needFrameGen && !needUpscale) {
+            if (initFailure_.empty()) {
+                initFailure_ =
+                    "No installed FSR product is supported on this hardware and API "
+                    "combination; the bridge is inert. See the per-feature reasons in "
+                    "the diagnostics panel.";
+                BFSR_LOG_INFO("%s", initFailure_.c_str());
+            }
             publishStatus();
             return;
         }
@@ -231,123 +333,136 @@ private:
         }
         ffx_.installGlobalDebugHandler(Logger::instance().level() <= LogLevel::Debug);
 
-        // Version discovery: AMD's own query, filtered by AMD's driver against
-        // this device. This is the authority on what can run, not our tables.
         queryVersions(device);
         publishStatus();
     }
 
+    /// Version discovery. AMD's query takes the device, so the driver has
+    /// already filtered the list against the real hardware — a far better
+    /// authority than any table this project could keep current.
     void queryVersions(ID3D12Device* device) {
-        upscalerVersions_.clear();
-        frameGenVersions_.clear();
-
-        Result r = queryFfxVersions(ffx_, FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE, device,
-                                    upscalerVersions_);
-        if (!r) {
-            BFSR_LOG_WARN("upscaler version enumeration: %s", r.reason().c_str());
-        } else {
-            BFSR_LOG_INFO("FSR upscaler providers available for this device: %zu",
-                          upscalerVersions_.size());
-            for (const auto& v : upscalerVersions_) {
-                BFSR_LOG_INFO("  %s%s", v.name.c_str(), v.isMachineLearning ? "  [ML]" : "");
-            }
-        }
-
-        r = queryFfxVersions(ffx_, FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION, device,
-                             frameGenVersions_);
-        if (!r) {
-            BFSR_LOG_WARN("frame-generation version enumeration: %s", r.reason().c_str());
-        } else {
-            BFSR_LOG_INFO("FSR frame-generation providers available for this device: %zu",
-                          frameGenVersions_.size());
-            for (const auto& v : frameGenVersions_) {
-                BFSR_LOG_INFO("  %s%s", v.name.c_str(), v.isMachineLearning ? "  [ML]" : "");
-            }
-        }
-
-        // An empty list here is decisive: the runtime is telling us this device
-        // has no provider, which overrides any optimism in our capability table.
-        if (upscalerVersions_.empty()) {
-            for (auto& f : capabilities_.features) {
-                if (f.feature == Feature::UpscalingMl || f.feature == Feature::UpscalingAnalytical) {
-                    f.available = false;
-                    if (f.unavailableReason.empty()) {
-                        f.unavailableReason =
-                            "The installed AMD FSR runtime reports no upscaling provider "
-                            "for this GPU and driver.";
-                    }
+        if (upscale_) {
+            const Result r = queryFfxVersions(ffx_, FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE,
+                                              device, upscale_->versions);
+            if (!r) {
+                BFSR_LOG_WARN("upscaler version enumeration: %s", r.reason().c_str());
+            } else {
+                BFSR_LOG_INFO("FSR upscaler providers for this device: %zu",
+                              upscale_->versions.size());
+                for (const auto& v : upscale_->versions) {
+                    BFSR_LOG_INFO("  %s%s", v.name.c_str(), v.isMachineLearning ? "  [ML]" : "");
                 }
             }
+            // An empty list is decisive: the runtime is telling us this device
+            // has no provider, which overrides any optimism in our table.
+            if (upscale_->versions.empty()) {
+                markUnavailable({Feature::UpscalingMl, Feature::UpscalingAnalytical},
+                                "The installed AMD FSR runtime reports no upscaling provider "
+                                "for this GPU and driver.");
+            }
         }
-        if (frameGenVersions_.empty()) {
-            for (auto& f : capabilities_.features) {
-                if (f.feature == Feature::FrameGenerationMl ||
-                    f.feature == Feature::FrameGenerationAnalytical) {
-                    f.available = false;
-                    if (f.unavailableReason.empty()) {
-                        f.unavailableReason =
-                            "The installed AMD FSR runtime reports no frame-generation "
-                            "provider for this GPU and driver.";
-                    }
+
+        if (frameGen_) {
+            const Result r = queryFfxVersions(ffx_, FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION,
+                                              device, frameGen_->versions);
+            if (!r) {
+                BFSR_LOG_WARN("frame-generation version enumeration: %s", r.reason().c_str());
+            } else {
+                BFSR_LOG_INFO("FSR frame-generation providers for this device: %zu",
+                              frameGen_->versions.size());
+                for (const auto& v : frameGen_->versions) {
+                    BFSR_LOG_INFO("  %s%s", v.name.c_str(), v.isMachineLearning ? "  [ML]" : "");
                 }
+            }
+            if (frameGen_->versions.empty()) {
+                markUnavailable({Feature::FrameGenerationMl, Feature::FrameGenerationAnalytical},
+                                "The installed AMD FSR runtime reports no frame-generation "
+                                "provider for this GPU and driver.");
             }
         }
     }
 
-    void publishStatus() {
-        if (!ipc_) return;
-        IpcStatus status;
-        status.bridgeVersion = BFSR_VERSION_STRING;
-        status.bridgeLoaded = true;
-        status.initialised = initFailure_.empty();
-        status.initFailureReason = initFailure_;
-        status.gpu = gpu_;
-        status.system = system_;
-        status.capabilities = capabilities_;
-        status.plan = plan_;
-        status.upscalerVersions = upscalerVersions_;
-        status.frameGenVersions = frameGenVersions_;
-        status.safeModeActive = settings_.safeMode;
-        status.frameGenSuppressReason = describeSuppressMask(gate_.lastSuppressMask());
-        status.depthSource = depthSource_;
-        status.motionVectorSource = motionVectorSource_;
-        status.renderedFps = renderedFrameTimes_.averageFps();
-        status.onePercentLowFps = renderedFrameTimes_.percentileLowFps(0.01);
-        status.pointOnePercentLowFps = renderedFrameTimes_.percentileLowFps(0.001);
-        status.frameTimeMs = renderedFrameTimes_.averageFrameTimeMs();
-        status.framesRendered = framesRendered_;
-        status.framesGenerated = frameGen_.generatedFrameCount();
-        status.upscalerVramBytes = upscalerVramBytes_;
-        status.frameGenVramBytes = frameGenVramBytes_;
+    void markUnavailable(std::initializer_list<Feature> features, const char* reason) {
+        for (auto& f : capabilities_.features) {
+            for (Feature target : features) {
+                if (f.feature != target) continue;
+                f.available = false;
+                if (f.unavailableReason.empty()) f.unavailableReason = reason;
+            }
+        }
+    }
 
+    StatusCommon buildCommon() const {
+        StatusCommon c;
+        c.bridgeVersion = BFSR_VERSION_STRING;
+        c.bridgeLoaded = true;
+        c.initialised = initFailure_.empty();
+        c.initFailureReason = initFailure_;
+        c.gpu = gpu_;
+        c.system = system_;
+        c.capabilities = capabilities_;
+        c.installedModules = modules_.toJson();
+        c.renderedFps = renderedFrameTimes_.averageFps();
+        c.onePercentLowFps = renderedFrameTimes_.percentileLowFps(0.01);
+        c.pointOnePercentLowFps = renderedFrameTimes_.percentileLowFps(0.001);
+        c.frameTimeMs = renderedFrameTimes_.averageFrameTimeMs();
+        c.framesRendered = framesRendered_;
+        c.depthSource = depthSource_;
+        c.motionVectorSource = motionVectorSource_;
         const auto recent = Logger::instance().recent(64);
-        status.recentLog.assign(recent.begin(), recent.end());
+        c.recentLog.assign(recent.begin(), recent.end());
+        return c;
+    }
 
-        ipc_->writeStatus(status);
+    void publishStatus() {
+        const StatusCommon common = buildCommon();
+
+        if (frameGen_ && frameGen_->ipc) {
+            FrameGenStatus status;
+            status.moduleInstalled = true;
+            status.common = common;
+            status.plan = frameGen_->plan;
+            status.versions = frameGen_->versions;
+            status.vramBytes = frameGen_->vramBytes;
+            status.framesGenerated = frameGen_->generator.generatedFrameCount();
+            status.observedGeneratedPerFrame = frameGen_->generator.observedGeneratedPerFrame();
+            status.suppressReason = describeSuppressMask(frameGen_->gate.lastSuppressMask());
+            status.antiLagActive = frameGen_->antiLag.isActive();
+            status.safeModeActive = frameGen_->settings.safeMode;
+            // Displayed frame rate only means something when interpolation is
+            // running, so it is reported by this product and not the other.
+            status.common.displayedFps = displayedFps_;
+            frameGen_->ipc->writeStatus(status);
+        }
+
+        if (upscale_ && upscale_->ipc) {
+            UpscaleStatus status;
+            status.moduleInstalled = true;
+            status.common = common;
+            status.plan = upscale_->plan;
+            status.versions = upscale_->versions;
+            status.vramBytes = upscale_->vramBytes;
+            status.jitterAvailable = false; // BeamNG exposes no jitter hook
+            status.safeModeActive = upscale_->settings.safeMode;
+            upscale_->ipc->writeStatus(status);
+        }
     }
 
     std::mutex mutex_;
     bool initialised_ = false;
     BridgePaths paths_;
-
-    std::unique_ptr<SettingsStore> settingsStore_;
-    std::unique_ptr<FileIpc> ipc_;
-    Settings settings_;
+    ModuleRegistry modules_;
     std::string initFailure_;
+
+    std::unique_ptr<FrameGenModule> frameGen_;
+    std::unique_ptr<UpscaleModule> upscale_;
 
     GpuInfo gpu_;
     SystemInfo system_;
     CapabilitySet capabilities_;
-    ResolvedPlan plan_;
-    std::vector<FfxVersionEntry> upscalerVersions_;
-    std::vector<FfxVersionEntry> frameGenVersions_;
 
     FfxLoader ffx_;
-    FsrUpscaler upscaler_;
-    FsrFrameGenerator frameGen_;
-    AntiLag2 antiLag_;
     ResourceRegistry registry_;
-    FrameGenerationGate gate_;
     FrameTimeTracker renderedFrameTimes_;
 
     ID3D12Device* realDevice_ = nullptr;
@@ -358,9 +473,7 @@ private:
     std::string depthSource_ = "not identified";
     std::string motionVectorSource_ = "not identified";
     uint64_t framesRendered_ = 0;
-    uint64_t upscalerVramBytes_ = 0;
-    uint64_t frameGenVramBytes_ = 0;
-    bool resolutionChanged_ = false;
+    float displayedFps_ = 0.0f;
 };
 
 } // namespace

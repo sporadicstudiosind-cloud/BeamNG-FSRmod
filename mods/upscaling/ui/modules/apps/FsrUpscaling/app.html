@@ -1,0 +1,260 @@
+<!--
+  SPDX-License-Identifier: MIT
+  Part of BeamNG FSR Bridge. See LICENSE at the repository root.
+
+  One screen. On/off, implementation, quality and sharpness are at the top;
+  calibration and debugging are collapsed.
+
+  Every control that can be unavailable renders the bridge's own explanation
+  beneath it, and the jitter limitation is shown wherever upscaling is enabled
+  rather than left in a README.
+-->
+<div class="fsr-app">
+  <link rel="stylesheet" href="/ui/modules/apps/FsrUpscaling/app.css">
+  <script src="/ui/modules/apps/FsrUpscaling/ui_shared.js"></script>
+
+  <header class="fsr-head">
+    <h3>AMD FSR Upscaling</h3>
+    <span class="fsr-pill" ng-if="ready()">active</span>
+    <span class="fsr-pill fsr-pill-off" ng-if="!ready()">inactive</span>
+  </header>
+
+  <div class="fsr-banner fsr-error" ng-if="status && !status.common.bridgeLoaded">
+    <strong>Native bridge not loaded.</strong>
+    <p>{{status.common.initFailureReason}}</p>
+  </div>
+
+  <div class="fsr-banner fsr-error"
+       ng-if="status.common.bridgeLoaded && !status.moduleInstalled">
+    <strong>Upscaling is not installed on the bridge side.</strong>
+    <p>The bridge is running but did not find this product's module manifest.
+       Copy the upscaling bridge folder over <code>BeamNG.drive.exe</code>'s
+       directory again.</p>
+  </div>
+
+  <div class="fsr-banner fsr-error"
+       ng-if="status.common.bridgeLoaded && status.common.initFailureReason">
+    <strong>Could not start.</strong>
+    <p>{{status.common.initFailureReason}}</p>
+  </div>
+
+  <div class="fsr-banner fsr-warn" ng-if="status.safeModeActive">
+    <strong>Safe mode is active.</strong>
+    <p>The previous session did not shut down cleanly, so upscaling is off. Your
+       settings were kept. Check <code>beamng_fsr/bridge.log</code>, then clear it.</p>
+    <button ng-click="clearSafeMode()">Clear safe mode</button>
+  </div>
+
+  <!-- ============================ main ============================ -->
+  <section ng-show="settings">
+
+    <div class="fsr-row fsr-row-primary">
+      <label>Upscaling</label>
+      <input type="checkbox" ng-model="settings.enabled" ng-change="onChange('enabled')"
+             ng-disabled="status.safeModeActive || !anyAvailable()">
+    </div>
+
+    <div class="fsr-row">
+      <label>Implementation</label>
+      <select ng-model="settings.implementation" ng-change="onChange('implementation')"
+              ng-disabled="!settings.enabled || !anyAvailable()">
+        <option value="auto">Auto (recommended)</option>
+        <option value="ml" ng-disabled="!available('upscaling_ml')">
+          ML — FSR Upscaling 4.x "Redstone"
+        </option>
+        <option value="analytical" ng-disabled="!available('upscaling_analytical')">
+          Analytical — FSR 3.1.x
+        </option>
+        <option value="disabled">Off</option>
+      </select>
+    </div>
+
+    <p class="fsr-reason" ng-if="!available('upscaling_ml')">
+      <strong>ML upscaling unavailable:</strong> {{reason('upscaling_ml')}}
+    </p>
+    <p class="fsr-reason" ng-if="!available('upscaling_analytical')">
+      <strong>Analytical upscaling unavailable:</strong> {{reason('upscaling_analytical')}}
+    </p>
+
+    <div class="fsr-row">
+      <label>Quality</label>
+      <select ng-model="settings.quality" ng-change="onChange('quality')"
+              ng-disabled="!settings.enabled">
+        <option value="nativeAA">Native AA — 1.0×, no upscaling</option>
+        <option value="quality">Quality — 1.5×</option>
+        <option value="balanced">Balanced — 1.7×</option>
+        <option value="performance">Performance — 2.0×</option>
+        <option value="ultraPerformance">Ultra Performance — 3.0×</option>
+        <option value="custom">Custom ratio</option>
+      </select>
+    </div>
+    <!-- No "Ultra Quality": it is not a mode in the current FSR API, and
+         listing it would mean inventing a ratio AMD does not define. -->
+
+    <div class="fsr-row" ng-if="settings.quality === 'custom'">
+      <label>Ratio <span class="fsr-value">{{settings.customUpscaleRatio | number:2}}×</span></label>
+      <input type="range" min="1" max="3" step="0.05"
+             ng-model="settings.customUpscaleRatio" ng-change="onSlider('customUpscaleRatio')">
+    </div>
+
+    <div class="fsr-row fsr-row-primary">
+      <label>Sharpening</label>
+      <input type="checkbox" ng-model="settings.sharpeningEnabled"
+             ng-change="onChange('sharpeningEnabled')" ng-disabled="!settings.enabled">
+    </div>
+
+    <div class="fsr-row">
+      <label>Sharpness <span class="fsr-value">{{settings.sharpness | number:2}}</span></label>
+      <input type="range" min="0" max="1" step="0.01"
+             ng-model="settings.sharpness" ng-change="onSlider('sharpness')"
+             ng-disabled="!settings.enabled || !settings.sharpeningEnabled">
+    </div>
+
+    <div class="fsr-live" ng-if="ready()">
+      <div><span>Running</span><b>{{status.plan.versionName || status.plan.backend}}</b></div>
+      <div><span>Resolution</span><b>{{resolutionText()}}</b></div>
+      <div><span>Rendered</span><b>{{metric(status.common.renderedFps, ' fps')}}</b></div>
+    </div>
+
+    <div class="fsr-banner fsr-info" ng-repeat="n in notes('downgrades')"><p>{{n}}</p></div>
+    <div class="fsr-banner fsr-warn" ng-repeat="n in notes('warnings')"><p>{{n}}</p></div>
+  </section>
+
+  <!-- ========================= diagnostics ========================= -->
+  <section>
+    <button class="fsr-disclose" ng-click="showDiagnostics = !showDiagnostics">
+      {{showDiagnostics ? '▾' : '▸'}} Diagnostics
+    </button>
+
+    <div ng-show="showDiagnostics">
+      <table class="fsr-diag">
+        <tr><td>GPU</td><td>{{status.common.environment.gpu.name || 'unknown'}}</td></tr>
+        <tr><td>Graphics API</td><td>{{status.common.environment.system.renderer}}</td></tr>
+        <tr><td>Shader model</td><td>{{status.common.environment.system.highestShaderModel}}</td></tr>
+        <tr><td>Bridge</td><td>{{status.common.bridgeVersion}}</td></tr>
+        <tr><td>Frame generation product</td>
+            <td>{{frameGenInstalled() ? 'installed' : 'not installed (optional)'}}</td></tr>
+        <tr class="fsr-sep"><td colspan="2"></td></tr>
+        <tr><td>Render → output</td><td>{{resolutionText()}}</td></tr>
+        <tr><td>Camera jitter</td>
+            <td>{{jitterAvailable() ? 'available' : 'not exposed by BeamNG'}}</td></tr>
+        <tr><td>Depth source</td><td>{{status.common.depthSource}}</td></tr>
+        <tr><td>Motion vectors</td><td>{{status.common.motionVectorSource}}</td></tr>
+        <tr class="fsr-sep"><td colspan="2"></td></tr>
+        <tr><td>Rendered FPS</td><td>{{metric(status.common.renderedFps, ' fps')}}</td></tr>
+        <tr><td>1% low</td><td>{{metric(status.common.onePercentLowFps, ' fps')}}</td></tr>
+        <tr><td>0.1% low</td><td>{{metric(status.common.pointOnePercentLowFps, ' fps')}}</td></tr>
+        <tr><td>Frame time</td><td>{{metric(status.common.frameTimeMs, ' ms', 2)}}</td></tr>
+        <tr><td>GPU cost</td><td>{{metric(status.gpuMs, ' ms', 2)}}</td></tr>
+        <tr><td>VRAM</td><td>{{megabytes(status.vramBytes)}}</td></tr>
+      </table>
+
+      <div class="fsr-decisions" ng-if="notes('decisions').length">
+        <h4>Why Auto chose this</h4>
+        <p ng-repeat="n in notes('decisions')">{{n}}</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========================== advanced =========================== -->
+  <section ng-show="settings">
+    <button class="fsr-disclose" ng-click="showAdvanced = !showAdvanced">
+      {{showAdvanced ? '▾' : '▸'}} Advanced
+    </button>
+
+    <div ng-show="showAdvanced">
+      <div class="fsr-row">
+        <label>Implementation version</label>
+        <select ng-model="settings.versionId" ng-change="onChange('versionId')"
+                ng-disabled="!versions().length">
+          <option value="auto">Auto (let AMD choose)</option>
+          <option ng-repeat="v in versions()" value="{{v.id}}">
+            {{v.name}}{{v.ml ? '  [ML]' : ''}}
+          </option>
+        </select>
+      </div>
+      <p class="fsr-note" ng-if="ready() && !versions().length">
+        The installed AMD FSR runtime reports no upscaling provider for this GPU
+        and driver.
+      </p>
+
+      <h4>Calibration</h4>
+      <p class="fsr-note">
+        BeamNG documents neither its depth nor its motion-vector encoding. These
+        correct it — turn on the debug view to check them against AMD's own
+        visualisation.
+      </p>
+
+      <div class="fsr-row">
+        <label>Depth convention</label>
+        <select ng-model="settings.calibration.depthConvention"
+                ng-change="onChange('calibration.depthConvention')">
+          <option value="auto">Auto (assume reversed-Z)</option>
+          <option value="reversedZ">Reversed-Z</option>
+          <option value="standardZ">Standard Z</option>
+        </select>
+      </div>
+      <div class="fsr-row">
+        <label>Infinite far plane</label>
+        <input type="checkbox" ng-model="settings.calibration.depthInfinite"
+               ng-change="onChange('calibration.depthInfinite')">
+      </div>
+      <div class="fsr-row">
+        <label>Motion vectors are UV space</label>
+        <input type="checkbox" ng-model="settings.calibration.motionVectorsAreUvSpace"
+               ng-change="onChange('calibration.motionVectorsAreUvSpace')">
+      </div>
+      <div class="fsr-row">
+        <label>Flip motion vector Y</label>
+        <input type="checkbox" ng-model="settings.calibration.motionVectorFlipY"
+               ng-change="onChange('calibration.motionVectorFlipY')">
+      </div>
+      <div class="fsr-row">
+        <label>MV scale X <span class="fsr-value">{{settings.calibration.motionVectorScaleX | number:2}}</span></label>
+        <input type="range" min="-2" max="2" step="0.01"
+               ng-model="settings.calibration.motionVectorScaleX"
+               ng-change="onSlider('calibration.motionVectorScaleX')">
+      </div>
+      <div class="fsr-row">
+        <label>MV scale Y <span class="fsr-value">{{settings.calibration.motionVectorScaleY | number:2}}</span></label>
+        <input type="range" min="-2" max="2" step="0.01"
+               ng-model="settings.calibration.motionVectorScaleY"
+               ng-change="onSlider('calibration.motionVectorScaleY')">
+      </div>
+
+      <h4>Debugging</h4>
+      <div class="fsr-row">
+        <label>FSR debug view</label>
+        <input type="checkbox" ng-model="settings.diagnostics.debugView"
+               ng-change="onChange('diagnostics.debugView')">
+      </div>
+      <div class="fsr-row">
+        <label>Benchmark mode</label>
+        <input type="checkbox" ng-model="settings.diagnostics.benchmarkMode"
+               ng-change="onChange('diagnostics.benchmarkMode')">
+      </div>
+      <div class="fsr-row">
+        <label>Log level</label>
+        <select ng-model="settings.diagnostics.logLevel"
+                ng-change="onChange('diagnostics.logLevel')">
+          <option value="error">error</option>
+          <option value="warn">warn</option>
+          <option value="info">info</option>
+          <option value="debug">debug</option>
+          <option value="trace">trace</option>
+        </select>
+      </div>
+      <div class="fsr-row">
+        <label>Force compatibility mode</label>
+        <input type="checkbox" ng-model="settings.diagnostics.forceCompatibilityMode"
+               ng-change="onChange('diagnostics.forceCompatibilityMode')">
+      </div>
+
+      <div class="fsr-actions">
+        <button ng-click="exportDiagnostics()">Export report</button>
+        <button ng-click="reset()">Reset settings</button>
+      </div>
+      <p class="fsr-note" ng-if="exportedTo">Written to <code>{{exportedTo}}</code></p>
+    </div>
+  </section>
+</div>
