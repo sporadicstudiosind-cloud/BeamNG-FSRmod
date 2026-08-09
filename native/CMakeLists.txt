@@ -57,47 +57,66 @@ if(BFSR_BUILD_BRIDGE)
             "then: cmake -DFSR_SDK_DIR=<abs path to that checkout> ...")
     endif()
 
+    set(FSR_SDK_INCLUDES
+        "${FSR_SDK_DIR}/Kits/FidelityFX/api/include"
+        "${FSR_SDK_DIR}/Kits/FidelityFX/api/include/dx12"
+        "${FSR_SDK_DIR}/Kits/FidelityFX/upscalers/include"
+        "${FSR_SDK_DIR}/Kits/FidelityFX/framegeneration/include"
+        "${FSR_SDK_DIR}/Kits/FidelityFX/framegeneration/include/dx12"
+        "${FSR_SDK_DIR}/Kits/OpenSource/amd/antilag2")
+
+    # --- the core: everything except the two entry-point stubs ---------------
     add_library(bfsr_bridge SHARED
-        src/proxy/dllmain.cpp
-        src/proxy/dxgi_exports.cpp
+        src/pipeline/bridge_runtime.cpp
         src/d3d12/resource_registry.cpp
         src/d3d12/device_proxy.cpp
-        src/d3d12/swapchain_proxy.cpp
         src/d3d12/factory_proxy.cpp
         src/caps/capability_detector_d3d12.cpp
         src/ffx/ffx_loader.cpp
-        src/ffx/ffx_version_manager.cpp
         src/ffx/fsr_upscaler.cpp
         src/ffx/fsr_framegen.cpp
         src/ffx/antilag2.cpp
-        src/pipeline/bridge_runtime.cpp
         src/ipc/file_ipc.cpp
         src/core/paths_win.cpp
     )
-    target_link_libraries(bfsr_bridge PRIVATE bfsr_core)
-    target_include_directories(bfsr_bridge PRIVATE
-        include
-        "${FSR_SDK_DIR}/Kits/FidelityFX/api/include"
-        "${FSR_SDK_DIR}/Kits/FidelityFX/upscalers/include"
-        "${FSR_SDK_DIR}/Kits/FidelityFX/framegeneration/include"
-        "${FSR_SDK_DIR}/Kits/OpenSource/amd/antilag2"
-    )
+    target_link_libraries(bfsr_bridge PRIVATE bfsr_core d3d12 dxgi)
+    target_include_directories(bfsr_bridge PRIVATE include ${FSR_SDK_INCLUDES})
     target_compile_definitions(bfsr_bridge PRIVATE
-        WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE
-        BFSR_VERSION_STRING="${PROJECT_VERSION}"
-    )
-    target_link_libraries(bfsr_bridge PRIVATE d3d12 dxgi)
+        WIN32_LEAN_AND_MEAN NOMINMAX BFSR_CORE_EXPORTS
+        BFSR_VERSION_STRING="${PROJECT_VERSION}")
+    set_target_properties(bfsr_bridge PROPERTIES OUTPUT_NAME "beamng_fsr_bridge" PREFIX "")
 
-    # The proxy must export DXGI's entry points under their exact names.
-    if(MSVC)
-        set_target_properties(bfsr_bridge PROPERTIES
-            OUTPUT_NAME "dxgi"
-            LINK_FLAGS "/DEF:\"${CMAKE_CURRENT_SOURCE_DIR}/src/proxy/dxgi_proxy.def\"")
-    else()
-        # MinGW consumes the .def file as an ordinary link input.
-        set_target_properties(bfsr_bridge PROPERTIES OUTPUT_NAME "dxgi" PREFIX "")
-        target_sources(bfsr_bridge PRIVATE src/proxy/dxgi_proxy.def)
+    # See src/ffx/antilag2.cpp for why Anti-Lag 2 is MSVC-only.
+    # (kept as a no-op here so the option is discoverable in one place)
+    # straight to a function pointer. MSVC accepts that; GCC and Clang reject it
+    # as ill-formed. The header is AMD's redistributable source and is not
+    # modified here, so the single translation unit that includes it is compiled
+    # with the relaxed rule instead.
+    if(NOT MSVC)
+        set_source_files_properties(src/ffx/antilag2.cpp
+            PROPERTIES COMPILE_OPTIONS "-fpermissive")
     endif()
+
+    # --- the two proxy stubs -------------------------------------------------
+    #
+    # Named exactly dxgi.dll and d3d12.dll: Windows resolves them from the
+    # executable's directory before the system directory, which is how the
+    # bridge loads without modifying a single BeamNG file.
+    function(bfsr_add_proxy_stub target source deffile outname)
+        add_library(${target} SHARED ${source})
+        target_include_directories(${target} PRIVATE include)
+        target_compile_definitions(${target} PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+        set_target_properties(${target} PROPERTIES OUTPUT_NAME ${outname} PREFIX "")
+        if(MSVC)
+            set_target_properties(${target} PROPERTIES
+                LINK_FLAGS "/DEF:\"${CMAKE_CURRENT_SOURCE_DIR}/${deffile}\"")
+        else()
+            target_sources(${target} PRIVATE ${deffile})
+        endif()
+    endfunction()
+
+    bfsr_add_proxy_stub(bfsr_stub_dxgi  src/proxy/dxgi_proxy.cpp  src/proxy/dxgi_proxy.def  "dxgi")
+    bfsr_add_proxy_stub(bfsr_stub_d3d12 src/proxy/d3d12_proxy.cpp src/proxy/d3d12_proxy.def "d3d12")
 endif()
 
 # ---------------------------------------------------------------------------
