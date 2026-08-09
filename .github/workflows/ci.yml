@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  portable:
+    name: Portable core + tests (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S native -B native/build -DBFSR_BUILD_BRIDGE=OFF -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build native/build --parallel
+
+      # The capability model, planner and IPC protocol carry the decisions that
+      # would otherwise let the mod offer options a GPU cannot run, so they are
+      # tested on every push rather than only compiled.
+      - name: Test
+        run: ./native/build/bfsr_tests
+
+  cross-compile:
+    name: Windows bridge (mingw cross-compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64 ninja-build
+
+      # The AMD headers are never vendored (docs/LEGAL.md), so the bridge build
+      # needs the SDK fetched first.
+      - name: Fetch AMD FSR SDK
+        run: python3 tools/fetch_fsr_sdk.py --dest third_party/FidelityFX-SDK
+
+      - name: Configure
+        run: |
+          cmake -S native -B native/build-win -G Ninja \
+            -DCMAKE_SYSTEM_NAME=Windows \
+            -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc \
+            -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++ \
+            -DBFSR_BUILD_BRIDGE=ON -DBFSR_BUILD_TESTS=OFF \
+            -DFSR_SDK_DIR="$PWD/third_party/FidelityFX-SDK"
+
+      - name: Build
+        run: cmake --build native/build-win
+
+      # A proxy stub that does not export exactly what the system DLL exports
+      # stops the game from starting, so the export tables are checked, not
+      # assumed.
+      - name: Verify proxy exports
+        run: |
+          for symbol in CreateDXGIFactory CreateDXGIFactory1 CreateDXGIFactory2; do
+            x86_64-w64-mingw32-objdump -p native/build-win/dxgi.dll | grep -q "$symbol" \
+              || { echo "dxgi.dll is missing $symbol"; exit 1; }
+          done
+          for symbol in D3D12CreateDevice D3D12SerializeRootSignature D3D12GetInterface; do
+            x86_64-w64-mingw32-objdump -p native/build-win/d3d12.dll | grep -q "$symbol" \
+              || { echo "d3d12.dll is missing $symbol"; exit 1; }
+          done
+          echo "proxy exports OK"
+
+  mod:
+    name: Mod half (Lua / JS / JSON)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LuaJIT
+        run: sudo apt-get update && sudo apt-get install -y luajit
+
+      - name: Check Lua syntax
+        run: |
+          for f in mod/lua/ge/extensions/fsr/*.lua; do
+            luajit -bl "$f" > /dev/null || { echo "syntax error in $f"; exit 1; }
+            echo "ok  $f"
+          done
+
+      - name: Check UI JavaScript
+        run: node --check mod/ui/modules/apps/FsrSettings/app.js && echo "ok  app.js"
+
+      - name: Check JSON
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, sys
+          bad = 0
+          for p in pathlib.Path('mod').rglob('*.json'):
+              try:
+                  json.load(p.open())
+                  print(f'ok  {p}')
+              except Exception as exc:
+                  print(f'FAIL {p}: {exc}'); bad += 1
+          sys.exit(1 if bad else 0)
+          PY
+
+      - name: Build the mod archive
+        run: python3 tools/package.py --mod-only

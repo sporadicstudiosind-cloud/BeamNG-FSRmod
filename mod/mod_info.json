@@ -1,0 +1,13 @@
+{
+  "beamng_fsr": {
+    "modname": "beamng_fsr",
+    "title": "AMD FSR Bridge",
+    "authors": "BeamNG FSR Bridge contributors",
+    "tagline": "AMD FidelityFX Super Resolution upscaling and frame generation for BeamNG.drive",
+    "description": "Adds AMD FSR upscaling and frame generation to BeamNG.drive's Direct3D 12 renderer. This mod ZIP is only half of the integration: BeamNG's Lua sandbox cannot load native code, so the FSR work itself is done by a separate native bridge installed alongside BeamNG.drive.exe. See docs/INSTALL.md. Without the bridge this mod does nothing except tell you it is missing.",
+    "tag_line": "AMD FSR upscaling and frame generation",
+    "version": "0.1.0",
+    "license": "MIT (mod). AMD FSR runtime is redistributed under AMD's own licence — see THIRD_PARTY_NOTICES.md.",
+    "requirements": "Windows 10/11, BeamNG.drive with the Direct3D 12 renderer, the native FSR bridge installed"
+  }
+}
