@@ -210,6 +210,15 @@ presenting it, and BeamNG believes the substitutes are backbuffers — so their
 resource state at Present is known rather than assumed, and FSR is told exactly
 that. Contrast §5, where the beacons' state has to be a setting.
 
+FSR also does not write the backbuffer directly. It declares its output as an
+unordered-access resource, and a swapchain's buffers only support that if the
+swapchain was created with `DXGI_USAGE_UNORDERED_ACCESS` — which an engine that
+only ever renders into them has no reason to request. So FSR writes a
+display-resolution texture the bridge owns and the result is copied across,
+which asks nothing of the swapchain. That texture's format drops any sRGB
+qualifier, because typed UAVs do not support sRGB; the copy is still legal,
+since a format and its sRGB variant share a typeless family.
+
 ## 12. The per-frame path has never executed a frame
 
 The Present hook, the command ring, the beacon resolution and the prepare

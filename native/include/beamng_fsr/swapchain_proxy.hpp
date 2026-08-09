@@ -89,9 +89,23 @@ public:
     [[nodiscard]] bool substituting() const noexcept { return !substitutes_.empty(); }
     /// The texture the game most recently rendered into — FSR's colour input.
     [[nodiscard]] ID3D12Resource* currentSubstitute() const noexcept;
-    /// The real swapchain's current backbuffer — FSR's output. Returns a
-    /// reference the caller must release.
+    /// The real swapchain's current backbuffer. Returns a reference the caller
+    /// must release.
     [[nodiscard]] ID3D12Resource* acquireRealBackBuffer() const;
+
+    /// Where FSR writes, before the result is copied into the backbuffer.
+    ///
+    /// FSR declares its output as an unordered-access resource, and a
+    /// swapchain's buffers only support that if the swapchain was created with
+    /// DXGI_USAGE_UNORDERED_ACCESS — which an engine that only ever renders
+    /// into them has no reason to ask for. So FSR writes here instead and the
+    /// result is copied across, which needs nothing of the swapchain.
+    ///
+    /// Its format drops any sRGB qualifier for the same reason: typed UAVs do
+    /// not support sRGB formats. The copy is still legal, because a format and
+    /// its sRGB variant share a typeless family and are copy-compatible.
+    [[nodiscard]] ID3D12Resource* upscaleTarget() const noexcept { return upscaleTarget_; }
+    [[nodiscard]] DXGI_FORMAT upscaleTargetFormat() const noexcept { return upscaleFormat_; }
 
     [[nodiscard]] uint32_t renderWidth() const noexcept { return renderWidth_; }
     [[nodiscard]] uint32_t renderHeight() const noexcept { return renderHeight_; }
@@ -182,6 +196,8 @@ private:
 
     ID3D12Device* device_ = nullptr;
     std::vector<ID3D12Resource*> substitutes_;
+    ID3D12Resource* upscaleTarget_ = nullptr;
+    DXGI_FORMAT upscaleFormat_ = DXGI_FORMAT_UNKNOWN;
     uint32_t substituteIndex_ = 0;
     float ratio_ = 1.0f;
     uint32_t renderWidth_ = 0;

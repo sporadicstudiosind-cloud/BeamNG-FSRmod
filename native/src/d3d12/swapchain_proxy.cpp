@@ -29,6 +29,20 @@ uint32_t scaled(uint32_t value, float ratio) {
     return std::max<uint32_t>(out, 1u);
 }
 
+/// Drops an sRGB qualifier, leaving the format otherwise identical.
+///
+/// Typed unordered-access views do not support sRGB formats, so FSR's output
+/// texture uses the plain variant. Copying it into an sRGB backbuffer is legal:
+/// the two share a typeless family, which is what CopyResource requires.
+DXGI_FORMAT withoutSrgb(DXGI_FORMAT format) {
+    switch (format) {
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return DXGI_FORMAT_R8G8B8A8_UNORM;
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return DXGI_FORMAT_B8G8R8A8_UNORM;
+        case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB: return DXGI_FORMAT_B8G8R8X8_UNORM;
+        default: return format;
+    }
+}
+
 } // namespace
 
 SwapChainProxy::SwapChainProxy(IDXGISwapChain4* real, PresentHook present, ResizeHook resize,
@@ -411,14 +425,11 @@ Result SwapChainProxy::createSubstitutes() {
     texture.Format = format_;
     texture.SampleDesc.Count = 1;
     texture.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    // RENDER_TARGET because the game will draw into these believing they are
-    // backbuffers; UNORDERED_ACCESS because FSR may want to write them and
-    // because the flag cannot be added after creation.
-    texture.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
-                    D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-
-    D3D12_CLEAR_VALUE clear{};
-    clear.Format = format_;
+    // RENDER_TARGET only. The game draws into these believing they are
+    // backbuffers; FSR and the blit read them and never write them. Requesting
+    // UNORDERED_ACCESS as well would buy nothing and would make creation fail
+    // outright on an sRGB swapchain format, which does not support typed UAVs.
+    texture.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
 
     substitutes_.reserve(desc.BufferCount);
     for (uint32_t i = 0; i < desc.BufferCount; ++i) {
@@ -427,8 +438,11 @@ Result SwapChainProxy::createSubstitutes() {
         // The game's first barrier on it will be PRESENT -> RENDER_TARGET,
         // exactly as it would be for a genuine swapchain buffer, so no engine
         // assumption is broken by the substitution.
+        // No optimised clear value, matching a real swapchain buffer: the game
+        // clears these with whatever colour it likes, and declaring one it does
+        // not use would draw a debug-layer warning on every clear.
         const HRESULT hr = device_->CreateCommittedResource(
-            &heap, D3D12_HEAP_FLAG_NONE, &texture, D3D12_RESOURCE_STATE_PRESENT, &clear,
+            &heap, D3D12_HEAP_FLAG_NONE, &texture, D3D12_RESOURCE_STATE_PRESENT, nullptr,
             __uuidof(ID3D12Resource), reinterpret_cast<void**>(&resource));
         if (FAILED(hr) || !resource) {
             releaseSubstitutes();
@@ -436,6 +450,21 @@ Result SwapChainProxy::createSubstitutes() {
                                 "a substitute backbuffer could not be created");
         }
         substitutes_.push_back(resource);
+    }
+
+    // FSR's output target, at display resolution.
+    upscaleFormat_ = withoutSrgb(format_);
+    D3D12_RESOURCE_DESC output = texture;
+    output.Width = presentWidth_;
+    output.Height = presentHeight_;
+    output.Format = upscaleFormat_;
+    output.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    if (FAILED(device_->CreateCommittedResource(
+            &heap, D3D12_HEAP_FLAG_NONE, &output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+            __uuidof(ID3D12Resource), reinterpret_cast<void**>(&upscaleTarget_)))) {
+        releaseSubstitutes();
+        return Result::fail(Status::RuntimeError,
+                            "the FSR output texture could not be created");
     }
 
     substituteIndex_ = 0;
@@ -452,6 +481,11 @@ void SwapChainProxy::releaseSubstitutes() {
     }
     substitutes_.clear();
     substituteIndex_ = 0;
+    if (upscaleTarget_) {
+        upscaleTarget_->Release();
+        upscaleTarget_ = nullptr;
+    }
+    upscaleFormat_ = DXGI_FORMAT_UNKNOWN;
 }
 
 Result SwapChainProxy::enableSubstitution(ID3D12Device* device, float ratio) {

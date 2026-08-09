@@ -769,12 +769,21 @@ private:
 
         const bool dispatching = wantDispatch && up.upscaler.isValid();
 
-        // The real backbuffer is entirely ours: the game has never seen it, so
-        // its state is exactly what the previous frame left it in — PRESENT.
-        // FSR writes it as a UAV, the blit as a render target.
-        transition(commandList, target, D3D12_RESOURCE_STATE_PRESENT,
-                   dispatching ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
-                               : D3D12_RESOURCE_STATE_RENDER_TARGET);
+        // FSR does not write the backbuffer directly. It declares its output as
+        // an unordered-access resource, and a swapchain's buffers only support
+        // that if the swapchain was created with DXGI_USAGE_UNORDERED_ACCESS —
+        // which an engine that only renders into them never asks for. So FSR
+        // writes the bridge's own display-resolution texture and the result is
+        // copied across, which asks nothing of the swapchain.
+        //
+        // The blit needs no intermediate: every swapchain buffer supports a
+        // render-target view, so it draws into the backbuffer directly.
+        ID3D12Resource* const fsrTarget = proxy->upscaleTarget();
+        if (dispatching && !fsrTarget) {
+            upscaleRing_.submit();
+            target->Release();
+            return;
+        }
 
         bool upscaled = false;
         if (dispatching) {
@@ -783,7 +792,7 @@ private:
             inputs.color = source;
             inputs.depth = depthResource_;
             inputs.motionVectors = motionResource_;
-            inputs.output = target;
+            inputs.output = fsrTarget;
             inputs.renderSize = render;
             inputs.upscaleSize = present;
             // Zero, and outside AMD's designed operating conditions: BeamNG
@@ -815,17 +824,27 @@ private:
             upscaleNeedsReset_ = false;
         }
 
-        if (!upscaled) {
+        if (upscaled) {
+            // FSR left its own texture in the unordered-access state it was
+            // handed in. Copy it over the backbuffer and put both back.
+            transition(commandList, fsrTarget, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                       D3D12_RESOURCE_STATE_COPY_SOURCE);
+            transition(commandList, target, D3D12_RESOURCE_STATE_PRESENT,
+                       D3D12_RESOURCE_STATE_COPY_DEST);
+            // Whole-resource copy: same dimensions, and the formats share a
+            // typeless family even when the backbuffer is sRGB.
+            commandList->CopyResource(target, fsrTarget);
+            transition(commandList, target, D3D12_RESOURCE_STATE_COPY_DEST,
+                       D3D12_RESOURCE_STATE_PRESENT);
+            transition(commandList, fsrTarget, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        } else {
             // FSR either was not asked to run or failed. The frame still has to
-            // reach the screen.
-            if (dispatching) {
-                // The dispatch left the target as a UAV; the blit needs it as a
-                // render target.
-                transition(commandList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                           D3D12_RESOURCE_STATE_RENDER_TARGET);
-            }
+            // reach the screen, so it is stretched instead.
             transition(commandList, source, D3D12_RESOURCE_STATE_PRESENT,
                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            transition(commandList, target, D3D12_RESOURCE_STATE_PRESENT,
+                       D3D12_RESOURCE_STATE_RENDER_TARGET);
             const Result blitted = blit_.record(commandList, source, target, present.width,
                                                 present.height);
             if (!blitted && blitted.reason() != lastBlitFailure_) {
@@ -840,9 +859,6 @@ private:
                        D3D12_RESOURCE_STATE_PRESENT);
             // The upscaler's history is stale once a frame has bypassed it.
             upscaleNeedsReset_ = true;
-        } else {
-            transition(commandList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                       D3D12_RESOURCE_STATE_PRESENT);
         }
 
         upscaleRing_.submit();
