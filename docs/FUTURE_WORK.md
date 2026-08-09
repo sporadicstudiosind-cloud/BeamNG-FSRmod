@@ -2,40 +2,29 @@
 
 Ordered by value, with the reasoning for each.
 
-## 0. Backbuffer substitution — what makes upscaling execute
+## 0. Verify backbuffer substitution against a real BeamNG install
 
-**Why:** it is the single missing piece for product 2. Everything else about
-upscaling is built and unused: the FSR context, the dispatch, the version
-selection, the planner, the settings and the UI. What does not exist is a way to
-give the dispatch an input and an output (`LIMITATIONS.md` §11).
+**Why:** it is implemented (`LIMITATIONS.md` §11) and it has never run. It is
+also the highest-risk mechanism in the bridge — it changes what BeamNG believes
+its swapchain is, and a wrong swapchain description is a black screen rather
+than a degraded image.
 
-**Work:** intercept `CreateSwapChainForHwnd`, create the *real* swapchain at
-display resolution, then hand BeamNG textures of the bridge's own at render
-resolution in place of its backbuffers:
+**Work:** the specific unknowns, in the order they would bite:
 
-- `GetBuffer` returns the substitute textures.
-- `GetDesc`/`GetDesc1` report the *reduced* size, so the engine sizes its
-  viewports, depth buffer and render targets to match.
-- Present runs the FSR upscale from the substitute into the real backbuffer,
-  then forwards.
-- `ResizeBuffers`/`ResizeBuffers1` and fullscreen transitions recreate both
-  sides in step.
+- whether BeamNG tolerates `GetDesc`/`GetDesc1` reporting a smaller size than
+  the window being presented into;
+- which resize convention BeamNG uses — passing back the size it was told, or a
+  fresh size read from the window. The bridge handles both, but only one is
+  real, and the other branch has never been exercised;
+- whether anything in BeamNG queries the swapchain through an interface the
+  proxy hands straight to the underlying object, and would therefore see the
+  display size while the rest of the engine sees the render size;
+- fullscreen transitions, which recreate the substitutes and are the least
+  exercised path of all.
 
-The resource states are the bridge's own throughout, which removes the
-assumption §5 has to make for the beacons.
-
-**Why it was not done first:** it is the highest-risk component in the whole
-design. A wrong swapchain description gives a black screen rather than a
-degraded image, the substitution has to stay coherent across fullscreen
-transitions and resizes, and none of it could be tested in an environment with
-no GPU, no Windows and no BeamNG. Frame generation reaches the same goal —
-higher frame rate — through AMD's interpolation swapchain, which needs none of
-this, so it was built first and completely.
-
-It is also worth being clear about what upscaling would be worth once it runs:
-BeamNG exposes no camera-jitter hook, so FSR's temporal upscaler would run
-outside its designed operating conditions (`LIMITATIONS.md` §1). Frame
-generation is barely affected by that. Upscaling is.
+**Why it is first:** everything else on this list is an improvement. This is the
+one item where the code might simply not work, and no amount of reading will
+settle it.
 
 ## 1. Extend the device wrapper to `ID3D12Device1..14`
 

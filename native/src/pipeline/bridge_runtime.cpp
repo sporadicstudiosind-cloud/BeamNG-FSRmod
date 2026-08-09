@@ -30,6 +30,7 @@
 #include "beamng_fsr/module_registry.hpp"
 #include "beamng_fsr/paths.hpp"
 #include "beamng_fsr/plan.hpp"
+#include "beamng_fsr/present_blit.hpp"
 #include "beamng_fsr/resource_registry.hpp"
 #include "beamng_fsr/swapchain_proxy.hpp"
 
@@ -174,6 +175,8 @@ public:
         // interpolation stop, the swapchain be released, and the runtime unload.
         if (swapChainProxy_) swapChainProxy_->detachHooks();
         ring_.destroy();
+        upscaleRing_.destroy();
+        blit_.destroy();
         if (frameGen_) {
             frameGen_->generator.destroyContext();
             frameGen_->generator.unwrapSwapChain();
@@ -230,17 +233,17 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         if (!factory || !riid) return factory;
 
-        // The swapchain is only worth intercepting for frame generation.
-        // Upscaling alone has no reason to replace the game's swapchain, so
-        // installing only that product leaves presentation completely untouched.
-        if (!modules_.isPresent(ModuleId::FrameGeneration)) return factory;
+        // Both products need the swapchain now: frame generation to install
+        // AMD's interpolation swapchain, upscaling to substitute the
+        // backbuffers. With neither installed the factory is left alone.
+        if (!modules_.anyPresent()) return factory;
 
         IDXGIFactory7* real7 = nullptr;
         auto* unknown = static_cast<IUnknown*>(factory);
         if (FAILED(unknown->QueryInterface(__uuidof(IDXGIFactory7),
                                            reinterpret_cast<void**>(&real7))) || !real7) {
-            BFSR_LOG_INFO("the DXGI factory does not expose IDXGIFactory7; frame "
-                          "generation cannot attach to it");
+            BFSR_LOG_INFO("the DXGI factory does not expose IDXGIFactory7; neither product "
+                          "can attach to it");
             return factory;
         }
 
@@ -271,6 +274,8 @@ public:
         // reference those same resources, and the beacon cache is dropped
         // because the engine will re-create its render targets at the new size.
         ring_.waitForIdle();
+        upscaleRing_.waitForIdle();
+        upscaleNeedsReset_ = true;
         beaconCacheValid_ = false;
         depthResource_ = nullptr;
         motionResource_ = nullptr;
@@ -310,7 +315,7 @@ private:
 
     IUnknown* handleSwapChainCreated(IUnknown* swapChain, IUnknown* deviceOrQueue) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!swapChain || !frameGen_) return nullptr;
+        if (!swapChain || !modules_.anyPresent()) return nullptr;
         if (swapChainProxy_) {
             BFSR_LOG_DEBUG("a second swapchain was created; only the first is driven");
             return nullptr;
@@ -324,8 +329,8 @@ private:
                                           reinterpret_cast<void**>(&queue));
         }
         if (!queue) {
-            BFSR_LOG_INFO("swapchain was not created against a D3D12 command queue; frame "
-                          "generation is unavailable for it");
+            BFSR_LOG_INFO("swapchain was not created against a D3D12 command queue; neither "
+                          "product can attach to it");
             return nullptr;
         }
 
@@ -348,7 +353,7 @@ private:
         // bridge's proxy then wraps *that*, so the per-frame hook runs before
         // AMD's swapchain sees the Present. Wrapping the other way round would
         // prepare a frame that had already been presented.
-        if (ffx_.isLoaded() && capabilities_.anyFrameGeneration()) {
+        if (frameGen_ && ffx_.isLoaded() && capabilities_.anyFrameGeneration()) {
             const Result wrapped = frameGen_->generator.wrapSwapChain(ffx_, &chain4, gameQueue_);
             if (!wrapped) {
                 Logger::instance().failureBlock(
@@ -357,7 +362,7 @@ private:
                     "frame generation stays off; BeamNG presents normally");
                 frameGenSwapChainFailure_ = wrapped.reason();
             }
-        } else {
+        } else if (frameGen_) {
             frameGenSwapChainFailure_ =
                 ffx_.isLoaded()
                     ? std::string("This GPU, driver and API combination supports no FSR "
@@ -374,6 +379,13 @@ private:
         swapChainProxy_ = new SwapChainProxy(chain4, &BridgeRuntime::onPresentThunk,
                                              &BridgeRuntime::onResizeThunk, this);
         chain4->Release(); // the proxy took its own reference
+
+        // Backbuffer substitution has to be decided now, before the game calls
+        // GetBuffer and builds render-target views it will keep for the
+        // session. There is no plan yet, so the ratio comes straight from the
+        // persisted settings — deterministic, and the planner still gets the
+        // final say each frame over whether a dispatch happens.
+        enableSubstitutionIfWanted();
 
         // Two reference-count details, both of which are bugs if omitted.
         //
@@ -394,6 +406,68 @@ private:
         return static_cast<IDXGISwapChain4*>(swapChainProxy_);
     }
 
+    /// Decides whether to substitute the backbuffers, and does it.
+    ///
+    /// Deliberately conservative: substitution changes what the game believes
+    /// its swapchain is, and the failure mode is a black screen rather than a
+    /// soft image. It is therefore only installed when upscaling is installed,
+    /// switched on, out of safe mode, supported by the hardware, and asking for
+    /// a ratio above 1. Anything else leaves the proxy a pure pass-through.
+    void enableSubstitutionIfWanted() {
+        if (!upscale_ || !swapChainProxy_ || !realDevice_) return;
+        if (!upscale_->settings.enabled || upscale_->settings.safeMode) return;
+        if (!capabilities_.anyUpscaling() || !ffx_.isLoaded()) return;
+
+        const float ratio = upscale_->settings.quality == QualityMode::Custom
+                                ? upscale_->settings.customUpscaleRatio
+                                : qualityModeRatio(upscale_->settings.quality);
+        if (ratio <= 1.0f) {
+            // Native AA renders at display resolution, so there is nothing to
+            // substitute. FSR would still sharpen, but not through this path.
+            BFSR_LOG_INFO("upscaling is enabled at a 1.0x ratio; no backbuffer substitution "
+                          "is needed");
+            return;
+        }
+
+        // The swapchain's own description, read directly: the proxy only learns
+        // its format as part of enabling substitution, and the blit has to be
+        // built before that so a failure leaves nothing substituted.
+        DXGI_SWAP_CHAIN_DESC1 desc{};
+        if (FAILED(swapChainProxy_->real()->GetDesc1(&desc)) ||
+            desc.Format == DXGI_FORMAT_UNKNOWN) {
+            BFSR_LOG_WARN("the swapchain description could not be read; upscaling stays off");
+            return;
+        }
+
+        // The fallback blit comes first, and substitution is refused without
+        // it. Once the game is rendering into our textures, something must
+        // write the real backbuffer every single frame; if the only thing that
+        // can do that is an FSR dispatch which has not started yet, the first
+        // frames are a black screen. Creating the blit up front makes "we can
+        // always produce a frame" a precondition rather than a hope.
+        const Result blit = blit_.create(realDevice_, desc.Format);
+        if (!blit) {
+            upscaleFailure_ = blit.reason();
+            Logger::instance().failureBlock("backbuffer substitution", blit.reason(),
+                                            "the fallback present blit",
+                                            "could not be created",
+                                            "upscaling disabled; BeamNG renders at native");
+            return;
+        }
+
+        const Result substituted = swapChainProxy_->enableSubstitution(realDevice_, ratio);
+        if (!substituted) {
+            blit_.destroy();
+            upscaleFailure_ = substituted.reason();
+            Logger::instance().failureBlock("backbuffer substitution", substituted.reason(),
+                                            "substitute backbuffers at render resolution",
+                                            "could not be created",
+                                            "upscaling disabled; BeamNG renders at native");
+            return;
+        }
+        upscaleFailure_.clear();
+    }
+
     // -----------------------------------------------------------------------
     // The per-frame driver.
     //
@@ -403,31 +477,30 @@ private:
     // context, locates the beacon or dispatches anything.
     // -----------------------------------------------------------------------
 
-    static void onPresentThunk(IDXGISwapChain4* swapChain, UINT syncInterval, UINT flags,
-                               void* ctx) {
+    static void onPresentThunk(SwapChainProxy* proxy, UINT syncInterval, UINT flags, void* ctx) {
         auto* self = static_cast<BridgeRuntime*>(ctx);
         if (!self) return;
         try {
-            self->onPresent(swapChain, syncInterval, flags);
+            self->onPresent(proxy, syncInterval, flags);
         } catch (...) {
             // A throw here would cross into BeamNG's render loop. Losing a
             // frame of FSR is always preferable.
         }
     }
 
-    static void onResizeThunk(IDXGISwapChain4* swapChain, void* ctx) {
+    static void onResizeThunk(SwapChainProxy* proxy, void* ctx) {
         auto* self = static_cast<BridgeRuntime*>(ctx);
         if (!self) return;
         try {
-            self->onSwapChainResize(swapChain);
+            self->onSwapChainResize(proxy);
         } catch (...) {
         }
     }
 
-    void onPresent(IDXGISwapChain4* swapChain, UINT syncInterval, UINT flags) {
+    void onPresent(SwapChainProxy* proxy, UINT syncInterval, UINT flags) {
         (void)syncInterval;
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!initialised_ || !swapChain) return;
+        if (!initialised_ || !proxy) return;
 
         // A test present is how an application probes an occluded window. It
         // presents nothing, so there is no frame to work on — and it is the
@@ -457,7 +530,18 @@ private:
             pollRequests();
         }
 
-        if (frameGen_) driveFrameGeneration(swapChain, frameTimeMs);
+        // Both products consume the beacons, so they are resolved once, before
+        // either drive runs. Doing it inside one of them would leave the other
+        // reading whatever the previous frame left behind — and on a
+        // single-product install, nothing at all.
+        resolveBeacons();
+
+        // Upscaling runs first and frame generation second, which is the order
+        // AMD specifies and the only one that makes sense here: interpolation
+        // works on the frames that are actually presented, and under
+        // substitution those are the upscaled ones.
+        if (upscale_) driveUpscaling(proxy, frameTimeMs);
+        if (frameGen_) driveFrameGeneration(proxy, frameTimeMs);
 
         if (now - lastStatusPublish_ >= std::chrono::milliseconds(400)) {
             lastStatusPublish_ = now;
@@ -613,18 +697,211 @@ private:
         return ctx;
     }
 
-    void driveFrameGeneration(IDXGISwapChain4* swapChain, float frameTimeMs) {
+
+    /// Upscaling's per-frame work: FSR reads the substituted backbuffer the
+    /// game rendered into and writes the real one that is about to be presented.
+    ///
+    /// Something must write the real backbuffer every frame once substitution
+    /// is on, because the game is no longer writing it. When FSR cannot run —
+    /// the mod half has not published its beacons yet, the plan is inactive, a
+    /// dispatch failed — the fallback blit stretches the frame instead. That
+    /// path exists so a missing dispatch is a soft image rather than a black
+    /// screen, and it is the reason substitution is safe to leave installed.
+    void driveUpscaling(SwapChainProxy* proxy, float frameTimeMs) {
+        UpscaleModule& up = *upscale_;
+
+        if (!proxy->substituting()) {
+            // No substitution means no colour input and no output to write, so
+            // there is nothing for the upscaler to do. The plan is cleared so
+            // the panel reports inactive rather than a stale active plan.
+            if (up.upscaler.isValid()) {
+                up.upscaler.destroy();
+                upscaleRing_.destroy();
+                blit_.destroy();
+            }
+            up.plan = UpscalePlan{};
+            return;
+        }
+
+        const Extent2D render{proxy->renderWidth(), proxy->renderHeight()};
+        const Extent2D present{proxy->presentWidth(), proxy->presentHeight()};
+        if (!render.valid() || !present.valid()) return;
+
+        RuntimeContext ctx = buildRuntimeContext(present);
+        ctx.sceneRenderSize = render;
+        up.plan = resolveUpscalePlan(up.settings, capabilities_, ctx);
+
+        ID3D12Resource* source = proxy->currentSubstitute();
+        ID3D12Resource* target = proxy->acquireRealBackBuffer();
+        if (!source || !target) {
+            if (target) target->Release();
+            return;
+        }
+
+        const bool wantDispatch = up.plan.active() && depthResource_ && motionResource_;
+
+        if (wantDispatch && up.upscaler.needsRecreate(up.plan, up.settings, colourIsHdr(proxy))) {
+            const Result created = up.upscaler.create(ffx_, realDevice_, up.plan, up.settings,
+                                                      colourIsHdr(proxy));
+            if (!created) {
+                upscaleFailure_ = created.reason();
+                Logger::instance().failureBlock("FSR upscaler", created.reason(),
+                                                "the FSR upscaling context",
+                                                "could not be created",
+                                                "presenting the rendered frame stretched "
+                                                "instead");
+            }
+        }
+
+        if (!upscaleRing_.isValid()) {
+            const Result ring = upscaleRing_.create(realDevice_, gameQueue_);
+            if (!ring) BFSR_LOG_WARN("upscaler command ring: %s", ring.reason().c_str());
+        }
+        auto* commandList = upscaleRing_.begin();
+        if (!commandList) {
+            // The previous frame's output stays on screen for one frame. The
+            // release is not optional: DXGI refuses ResizeBuffers while any
+            // reference to a back buffer is outstanding, so leaking one here
+            // would break every resolution change from this point on.
+            target->Release();
+            return;
+        }
+
+        const bool dispatching = wantDispatch && up.upscaler.isValid();
+
+        // The real backbuffer is entirely ours: the game has never seen it, so
+        // its state is exactly what the previous frame left it in — PRESENT.
+        // FSR writes it as a UAV, the blit as a render target.
+        transition(commandList, target, D3D12_RESOURCE_STATE_PRESENT,
+                   dispatching ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+                               : D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+        bool upscaled = false;
+        if (dispatching) {
+            UpscaleFrameInputs inputs;
+            inputs.commandList = commandList;
+            inputs.color = source;
+            inputs.depth = depthResource_;
+            inputs.motionVectors = motionResource_;
+            inputs.output = target;
+            inputs.renderSize = render;
+            inputs.upscaleSize = present;
+            // Zero, and outside AMD's designed operating conditions: BeamNG
+            // exposes no projection-jitter hook, so the temporal upscaler
+            // cannot recover sub-pixel detail. LIMITATIONS.md section 1 — this
+            // is the headline limitation and the UI states it whenever
+            // upscaling is on.
+            inputs.jitterX = 0.0f;
+            inputs.jitterY = 0.0f;
+            inputs.motionVectorScaleX = up.settings.calibration.motionVectorScaleX;
+            inputs.motionVectorScaleY = up.settings.calibration.motionVectorScaleY;
+            inputs.frameTimeDeltaMs = frameTimeMs > 0.0f ? frameTimeMs : 16.6f;
+            inputs.reset = upscaleNeedsReset_;
+            if (shared_.cameraValid) {
+                inputs.cameraNear = shared_.cameraNear;
+                inputs.cameraFar = shared_.cameraFar;
+                inputs.cameraFovVerticalRadians = shared_.cameraFovVerticalRadians;
+            }
+            inputs.viewSpaceToMetersFactor = 1.0f; // BeamNG's world unit is the metre
+
+            const Result dispatched = up.upscaler.dispatch(inputs, up.settings);
+            upscaled = dispatched.isOk();
+            if (!dispatched && dispatched.reason() != upscaleFailure_) {
+                upscaleFailure_ = dispatched.reason();
+                BFSR_LOG_WARN("FSR upscale dispatch: %s", upscaleFailure_.c_str());
+            } else if (dispatched) {
+                upscaleFailure_.clear();
+            }
+            upscaleNeedsReset_ = false;
+        }
+
+        if (!upscaled) {
+            // FSR either was not asked to run or failed. The frame still has to
+            // reach the screen.
+            if (dispatching) {
+                // The dispatch left the target as a UAV; the blit needs it as a
+                // render target.
+                transition(commandList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                           D3D12_RESOURCE_STATE_RENDER_TARGET);
+            }
+            transition(commandList, source, D3D12_RESOURCE_STATE_PRESENT,
+                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            const Result blitted = blit_.record(commandList, source, target, present.width,
+                                                present.height);
+            if (!blitted && blitted.reason() != lastBlitFailure_) {
+                lastBlitFailure_ = blitted.reason();
+                BFSR_LOG_WARN("fallback present blit: %s", lastBlitFailure_.c_str());
+            }
+            // Hand the substitute back exactly as the game left it, or its next
+            // barrier from PRESENT would be starting from the wrong state.
+            transition(commandList, source, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                       D3D12_RESOURCE_STATE_PRESENT);
+            transition(commandList, target, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                       D3D12_RESOURCE_STATE_PRESENT);
+            // The upscaler's history is stale once a frame has bypassed it.
+            upscaleNeedsReset_ = true;
+        } else {
+            transition(commandList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                       D3D12_RESOURCE_STATE_PRESENT);
+        }
+
+        upscaleRing_.submit();
+        target->Release();
+    }
+
+    /// Records one resource barrier. FSR's backend transitions the resources it
+    /// is *given*; these are the ones the bridge owns and must move itself.
+    static void transition(ID3D12GraphicsCommandList* commandList,
+                           ID3D12Resource* resource,
+                           D3D12_RESOURCE_STATES from,
+                           D3D12_RESOURCE_STATES to) {
+        if (from == to) return;
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = resource;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barrier.Transition.StateBefore = from;
+        barrier.Transition.StateAfter = to;
+        commandList->ResourceBarrier(1, &barrier);
+    }
+
+    /// Whether the swapchain's format carries high dynamic range.
+    ///
+    /// Read from the format rather than from a setting: FSR needs to know how
+    /// to interpret the colour it is handed, and the swapchain is the authority
+    /// on that.
+    [[nodiscard]] static bool colourIsHdr(const SwapChainProxy* proxy) {
+        switch (proxy->format()) {
+            case DXGI_FORMAT_R16G16B16A16_FLOAT:
+            case DXGI_FORMAT_R32G32B32A32_FLOAT:
+            case DXGI_FORMAT_R10G10B10A2_UNORM:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    void driveFrameGeneration(SwapChainProxy* proxy, float frameTimeMs) {
         FrameGenModule& fg = *frameGen_;
 
+        // The *real* swapchain's description, deliberately: the proxy reports
+        // the render resolution to the game under substitution, and frame
+        // generation interpolates the frames that are presented.
         DXGI_SWAP_CHAIN_DESC1 desc{};
-        if (FAILED(swapChain->GetDesc1(&desc)) || desc.Width == 0 || desc.Height == 0) return;
+        if (FAILED(proxy->real()->GetDesc1(&desc)) || desc.Width == 0 || desc.Height == 0) return;
         const Extent2D display{desc.Width, desc.Height};
 
         const bool resolutionChanged = displaySize_.valid() && displaySize_ != display;
         displaySize_ = display;
 
-        resolveBeacons();
-        const RuntimeContext ctx = buildRuntimeContext(display);
+        RuntimeContext ctx = buildRuntimeContext(display);
+        // BUG worth stating: with upscaling substituting the backbuffers, the
+        // beacons are at the render resolution, not the display resolution.
+        // Telling FSR the inputs are display-sized would have it sample motion
+        // vectors over the wrong area of the texture.
+        if (proxy->substituting()) {
+            ctx.sceneRenderSize = Extent2D{proxy->renderWidth(), proxy->renderHeight()};
+        }
         fg.plan = resolveFrameGenPlan(fg.settings, capabilities_, ctx);
 
         if (!fg.plan.active()) {
@@ -738,7 +1015,7 @@ private:
 
                 const Result dispatched = fg.generator.prepare(inputs, fg.settings, frameId_);
                 const Result submitted = ring_.submit();
-                prepared = dispatched.ok() && submitted.ok();
+                prepared = dispatched.isOk() && submitted.isOk();
                 if (!dispatched && dispatched.reason() != lastPrepareFailure_) {
                     lastPrepareFailure_ = dispatched.reason();
                     BFSR_LOG_WARN("frame-generation prepare: %s", lastPrepareFailure_.c_str());
@@ -772,34 +1049,6 @@ private:
         if (!sysResult) BFSR_LOG_WARN("system detection: %s", sysResult.reason().c_str());
 
         capabilities_ = evaluateCapabilities(gpu_, system_);
-
-        // Upscaling has no per-frame execution path in this build, and saying
-        // so here is what stops the panel reporting "active" for something that
-        // never runs.
-        //
-        // The reason is structural rather than a missing feature. Upscaling
-        // means presenting more pixels than the game rendered, and a DXGI-level
-        // layer can only do that by substituting the swapchain's backbuffers:
-        // creating the real swapchain at display resolution, handing BeamNG
-        // smaller textures in place of its backbuffers, and reporting the
-        // smaller size from GetDesc so the engine sizes its viewports to match.
-        // Frame generation needs none of that — AMD's interpolation swapchain
-        // presents at the resolution the game already chose — which is why one
-        // product executes here and the other does not.
-        //
-        // Everything else for upscaling is real: the FSR context, the dispatch,
-        // the planner, the version selection. What is missing is the layer that
-        // would give it a colour input and an output to write. FUTURE_WORK.md
-        // describes it; docs/LIMITATIONS.md §11 records it as a limitation.
-        if (upscale_) {
-            markUnavailable({Feature::UpscalingMl, Feature::UpscalingAnalytical},
-                            "This build has no execution path for upscaling. Presenting more "
-                            "pixels than BeamNG rendered requires substituting the swapchain's "
-                            "backbuffers, which this bridge does not do. The frame generation "
-                            "product is unaffected and runs independently.");
-            BFSR_LOG_WARN("upscaling is installed but has no execution path in this build; "
-                          "see docs/LIMITATIONS.md section 11");
-        }
 
         logEnvironment(gpu_, system_, capabilities_);
 
@@ -969,6 +1218,11 @@ private:
 
     // --- per-frame driver state --------------------------------------------
     FrameCommandRing ring_;
+    FrameCommandRing upscaleRing_;
+    PresentBlit blit_;
+    bool upscaleNeedsReset_ = true;
+    std::string upscaleFailure_;
+    std::string lastBlitFailure_;
     SharedFrameState shared_;
     bool haveSharedState_ = false;
     std::chrono::steady_clock::time_point lastPresent_{};

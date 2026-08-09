@@ -39,10 +39,12 @@ the swapchain. Two workable modes result:
 | Mode | How | Trade-off |
 | --- | --- | --- |
 | **Frame generation only** (recommended) | BeamNG renders at native; the bridge inserts interpolated frames. | Fully coherent. No image-quality cost to the rendered frames. |
-| **Upscaling** | Lower BeamNG's own resolution; the bridge upscales to display resolution at present time. | BeamNG's UI is also rendered at the lower resolution and then upscaled. |
+| **Upscaling** | The bridge substitutes the swapchain's backbuffers with render-resolution textures and upscales into the real one at present time (§11). | BeamNG's UI is rendered at the lower resolution and upscaled with the scene. |
 
 A true "render at 1440p, present at 4K with a native-resolution UI" split
-requires engine cooperation that does not exist.
+requires engine cooperation that does not exist. What the bridge can do is make
+the *whole frame*, UI included, follow the render resolution — which is what
+substitution does.
 
 ## 3. Vulkan and Direct3D 11 cannot be supported
 
@@ -166,44 +168,56 @@ archive. If it does not, the beacon fails to create, the bridge reports the
 render inputs as unavailable, and both products stay off — visibly, with a
 reason, rather than silently.
 
-## 11. Upscaling does not execute in this build
+## 11. Upscaling substitutes the swapchain's backbuffers
 
-**Frame generation runs. Upscaling does not.** Everything about the upscaling
-product is real except the one layer that would let it do work: the FSR context,
-the dispatch, the version selection, the planner, the settings and the UI all
-exist and are exercised, and nothing calls the dispatch.
+This is the most invasive thing the bridge does, and it is worth understanding
+before enabling it.
 
-The reason is structural, not an oversight. Upscaling means presenting more
-pixels than the game rendered. A DXGI-level layer can only arrange that by
-**substituting the swapchain's backbuffers**: creating the real swapchain at
-display resolution, handing BeamNG smaller textures in place of its backbuffers,
-reporting the smaller size from `GetDesc`/`GetDesc1` so the engine sizes its
-viewports to match, and running FSR from the small texture into the real
-backbuffer at Present.
+Upscaling means presenting more pixels than the game rendered. A DXGI-level
+layer has exactly one way to arrange that: leave the real swapchain at display
+resolution, hand BeamNG textures of the bridge's own at render resolution in
+place of its backbuffers, and report the smaller size from `GetDesc` so the
+engine sizes its viewports, depth buffer and render targets to match. At Present,
+FSR reads the substitute and writes the real backbuffer.
 
-Frame generation needs none of that — AMD's interpolation swapchain presents at
-the resolution the game already chose — which is exactly why one product
-executes here and the other does not.
+Frame generation needs none of this — AMD's interpolation swapchain presents at
+the resolution the game already chose — which is why it is the safer product.
 
-The bridge does not paper over this:
+What follows from the mechanism:
 
-- Both upscaling capabilities are marked unavailable at startup with that
-  reason, so the planner refuses and no plan is ever active.
-- The panel leads with a red banner saying so and pointing at the frame
-  generation product.
-- The status pill reads *inactive*, because "active" now requires a live plan
-  rather than merely an installed product.
+- **BeamNG's UI is upscaled with the scene.** The UI is drawn into what BeamNG
+  believes is its backbuffer, which is the render-resolution substitute. A true
+  "render at 1440p, present at 4K with a native-resolution UI" split needs
+  engine cooperation that does not exist.
+- **The failure mode is a black screen, not a soft image.** Once the game is
+  rendering into the bridge's textures, something must write the real backbuffer
+  every single frame. That is why substitution is refused unless the fallback
+  blit was created first: a plain bilinear stretch is always available, so a
+  frame FSR could not produce is soft rather than absent.
+- **It is off unless you turn upscaling on.** Substitution is refused in safe
+  mode, refused at a 1.0× ratio (Native AA), and refused if the substitutes
+  cannot be created. With it off, the swapchain proxy is a pure pass-through.
+- **Resize handling is a documented guess.** On a resize the engine may pass
+  back the render size it was told, or a new display size it read from the
+  window. The bridge treats zeros as "match the window", a size equal to the
+  render size as a no-change resize, and anything else as a real display size.
+  Both conventions land correctly, but which one BeamNG uses has not been
+  observed.
 
-`FUTURE_WORK.md` describes the substitution layer. It was not attempted here
-because it is the highest-risk component in the design — a wrong swapchain
-description gives a black screen rather than a degraded image — and it could not
-be tested at all in this environment.
+One thing here is *not* a guess, unusually for this project. Direct3D 12
+requires an application to transition a backbuffer to `PRESENT` before
+presenting it, and BeamNG believes the substitutes are backbuffers — so their
+resource state at Present is known rather than assumed, and FSR is told exactly
+that. Contrast §5, where the beacons' state has to be a setting.
 
 ## 12. The per-frame path has never executed a frame
 
 The Present hook, the command ring, the beacon resolution and the prepare
 dispatch all compile against AMD's real API and are wired together. **None of it
 has run.** No frame has been prepared, no allocator reset, no fence signalled.
+
+The same is true of backbuffer substitution: no substitute texture has ever
+been handed to a game, no `GetDesc` has ever returned a reduced size.
 
 The specific things that would surface first on real hardware:
 
@@ -213,7 +227,10 @@ The specific things that would surface first on real hardware:
   (§10) — if not, the beacons never exist and the bridge reports the inputs as
   unavailable;
 - whether the two beacon targets really are allocated one frame apart as the
-  staged enable intends, which is what their identity depends on.
+  staged enable intends, which is what their identity depends on;
+- whether BeamNG tolerates a swapchain that reports a smaller size than the
+  window it is presenting into (§11), which is the assumption backbuffer
+  substitution rests on.
 
 Each fails visibly rather than silently: no beacon means no dispatch, and no
 dispatch means frame generation stays off with a reason in the panel.

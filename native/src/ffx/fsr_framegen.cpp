@@ -31,24 +31,6 @@ uint32_t buildFrameGenDispatchFlags(const FrameGenSettings& settings) {
     return flags;
 }
 
-/// The state the beacon targets are declared to be in.
-///
-/// FSR's DX12 backend transitions the resources it is handed *from* the state
-/// the caller declares, and D3D12 offers no way to ask a resource what state it
-/// is in. BeamNG does not document what its PostFX system leaves a target in,
-/// so this is a calibration setting with a documented default rather than an
-/// assertion — see RenderCalibration::beaconResourceState. `sanitise()` has
-/// already rejected anything not in this list, so the default arm is
-/// unreachable for a sanitised document and exists only to be total.
-uint32_t beaconResourceState(const RenderCalibration& calibration) {
-    const std::string& s = calibration.beaconResourceState;
-    if (s == "pixelRead") return FFX_API_RESOURCE_STATE_PIXEL_READ;
-    if (s == "computeRead") return FFX_API_RESOURCE_STATE_COMPUTE_READ;
-    if (s == "renderTarget") return FFX_API_RESOURCE_STATE_RENDER_TARGET;
-    if (s == "genericRead") return FFX_API_RESOURCE_STATE_GENERIC_READ;
-    if (s == "common") return FFX_API_RESOURCE_STATE_COMMON;
-    return FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ;
-}
 
 } // namespace
 

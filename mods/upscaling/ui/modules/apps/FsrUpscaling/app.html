@@ -38,16 +38,16 @@
     <p>{{status.common.initFailureReason}}</p>
   </div>
 
-  <!-- Stated first and unconditionally, because a panel that looks configurable
-       but never runs anything is worse than one that says so. -->
-  <div class="fsr-banner fsr-error"
-       ng-if="status.common.bridgeLoaded && !available('upscaling_ml') && !available('upscaling_analytical')">
-    <strong>Upscaling does not execute in this build.</strong>
-    <p>{{reason('upscaling_ml') || reason('upscaling_analytical')}}</p>
-    <p>The settings below are read, stored and planned against, and the
-       diagnostics are live — but no FSR upscale is dispatched. If you installed
-       this for a frame-rate gain, install the <em>AMD FSR Frame Generation</em>
-       product instead: that one runs.</p>
+  <!-- The jitter limitation is stated wherever upscaling is enabled rather
+       than left in a README: it is structural, it cannot be configured away,
+       and it is the single thing most likely to make a user think the mod is
+       broken when it is working as well as it can. -->
+  <div class="fsr-banner fsr-warn" ng-if="settings.enabled">
+    <strong>BeamNG exposes no camera-jitter hook.</strong>
+    <p>FSR's temporal upscaler is designed around a jittered projection matrix,
+       and no BeamNG modding API can supply one. Expect a noticeably softer
+       image than a native FSR integration at the same preset. This is not a bug
+       and no setting fixes it — see <code>docs/LIMITATIONS.md</code> §1.</p>
   </div>
 
   <div class="fsr-banner fsr-warn" ng-if="status.safeModeActive">

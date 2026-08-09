@@ -58,7 +58,7 @@ without touching the other.
 │  ┌──────────── NATIVE HALF (Microsoft APIs only) ──────────────────┐  │ │
 │  │  dxgi.dll   → DxgiFactoryProxy    → sees swapchain creation     │  │ │
 │  │  d3d12.dll  → D3D12DeviceProxy    → sees texture creation ◄─────┼──┼─┘
-│  │  SwapChainProxy → Present, the per-frame tick                   │  │
+│  │  SwapChainProxy → Present tick + backbuffer substitution        │  │
 │  │                                                                  │  │
 │  │  beamng_fsr_bridge.dll   one runtime, two gated modules          │  │
 │  │    ModuleRegistry     which products declared themselves        │  │
@@ -69,8 +69,10 @@ without touching the other.
 │  │    AntiLag2           AMD driver extension                      │  │
 │  │    resolveFrameGenPlan()                                        │  │
 │  │    FrameCommandRing   FSR's own allocators/list/fence           │  │
-│  │    ── upscaling module (built, NOT executed — LIMITATIONS §11) ─ │  │
-│  │    FsrUpscaler        ffxDispatchDescUpscale — never dispatched  │  │
+│  │    ── upscaling module ─────────────────────────────────────    │  │
+│  │    FsrUpscaler        ffxDispatchDescUpscale                    │  │
+│  │    PresentBlit        fallback stretch, so a missed dispatch    │  │
+│  │                       is a soft frame and not a black one       │  │
 │  │    resolveUpscalePlan()                                         │  │
 │  │    ── shared ───────────────────────────────────────────────    │  │
 │  │    ResourceRegistry   descriptions of live textures             │  │
@@ -245,11 +247,44 @@ game frame N
 AMD's swapchain *not* to interpolate this one, and skipping it would leave the
 previous frame's decision in force.
 
-**Upscaling has no equivalent flow.** It has a real FSR context and a real
-dispatch that nothing calls, because presenting more pixels than BeamNG rendered
-needs a backbuffer-substitution layer this build does not have. The bridge marks
-both upscaling capabilities unavailable at startup with that reason rather than
-letting the panel imply otherwise. See `LIMITATIONS.md` §11.
+## Upscaling flow
+
+Upscaling runs through the same Present tick, before frame generation — the
+order AMD specifies, and the only coherent one here, since interpolation works
+on the frames that are actually presented.
+
+```
+swapchain creation
+  └─ SwapChainProxy::enableSubstitution()
+       ├─ real swapchain stays at display resolution
+       └─ N textures created at display / ratio
+
+game frame N
+  ├─ GetDesc/GetDesc1 report the RENDER size, so BeamNG sizes its viewports,
+  │    depth buffer and render targets to match
+  ├─ GetBuffer/GetCurrentBackBufferIndex hand out the substitutes
+  ├─ BeamNG renders the scene *and its UI* into a substitute
+  ├─ SwapChainProxy::Present  ── the tick ──┐
+  │    ├─ barrier: real backbuffer PRESENT -> UNORDERED_ACCESS
+  │    ├─ ffxDispatchDescUpscale  substitute -> real backbuffer
+  │    └─ barrier: real backbuffer -> PRESENT
+  └─ forwarded Present
+```
+
+The substitute's resource state is *known* rather than assumed: Direct3D 12
+requires an application to transition a backbuffer to PRESENT before presenting
+it, and BeamNG believes the substitute is one. The real backbuffer is the
+bridge's alone, so its state is whatever the previous frame left.
+
+When FSR cannot run — the beacons are not published yet, the plan is inactive, a
+dispatch failed — `PresentBlit` stretches the substitute into the backbuffer
+instead. That path is why substitution is safe to leave installed: something
+must write the real backbuffer every frame once the game has stopped doing it,
+and a bilinear stretch is always available. Substitution is refused outright if
+the blit could not be created.
+
+See `LIMITATIONS.md` §11 for what follows from the mechanism, including the UI
+being upscaled with the scene.
 
 The gate is what stops interpolation across pauses, loads, menus, replays,
 photo mode, occlusion, resolution changes, camera cuts and frame-time hitches,

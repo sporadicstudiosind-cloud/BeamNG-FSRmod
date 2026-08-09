@@ -7,13 +7,40 @@
 
 #include "beamng_fsr/plan.hpp"
 #include "beamng_fsr/result.hpp"
+#include "beamng_fsr/settings.hpp"
 
 // AMD's public API. Fetched by tools/fetch_fsr_sdk.py rather than vendored —
 // see docs/LEGAL.md for why.
 #include <ffx_api.h>
 #include <ffx_api_loader.h>
+// FfxApiResourceState, for the beacon-state translation below.
+#include <ffx_api_types.h>
 
 namespace bfsr {
+
+/// The state the PostFX beacon targets are declared to be in.
+///
+/// FSR's DX12 backend transitions the resources it is handed *from* the state
+/// the caller declares, and Direct3D 12 offers no way to ask a resource what
+/// state it is in. BeamNG does not document what its PostFX system leaves a
+/// render target in, so this is a calibration setting with a documented default
+/// rather than an assertion — see RenderCalibration::beaconResourceState and
+/// docs/LIMITATIONS.md section 5. `sanitise()` has already rejected anything
+/// outside this list, so the final arm is unreachable for a sanitised document
+/// and exists only to be total.
+///
+/// This applies to the beacons alone. A substituted backbuffer's state is
+/// *known* — the game must transition it to PRESENT before presenting — and is
+/// declared as such directly.
+inline uint32_t beaconResourceState(const RenderCalibration& calibration) {
+    const std::string& s = calibration.beaconResourceState;
+    if (s == "pixelRead") return FFX_API_RESOURCE_STATE_PIXEL_READ;
+    if (s == "computeRead") return FFX_API_RESOURCE_STATE_COMPUTE_READ;
+    if (s == "renderTarget") return FFX_API_RESOURCE_STATE_RENDER_TARGET;
+    if (s == "genericRead") return FFX_API_RESOURCE_STATE_GENERIC_READ;
+    if (s == "common") return FFX_API_RESOURCE_STATE_COMMON;
+    return FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ;
+}
 
 /// Owns the AMD FSR runtime.
 ///

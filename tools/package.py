@@ -56,13 +56,16 @@ PRODUCTS = {
         "manifest": "packaging/manifests/upscaling.module.json",
         "effect_dlls": ["amd_fidelityfx_upscaler_dx12.dll"],
         "ui_app": "FsrUpscaling",
-        "note": "IMPORTANT: upscaling does not execute in this build. The FSR\n"
-                "context, dispatch and planner are all present, but nothing\n"
-                "dispatches them: presenting more pixels than BeamNG rendered\n"
-                "needs backbuffer substitution, which this bridge does not do.\n"
-                "The panel says so on start. If you want a frame-rate gain,\n"
-                "install the AMD FSR Frame Generation product instead.\n"
-                "Read docs/LIMITATIONS.md section 11 before installing this.",
+        "note": "Two things to know before enabling this.\n\n"
+                "BeamNG exposes no camera-jitter hook, so FSR runs without the\n"
+                "sub-pixel jitter its temporal upscaler is designed around, and\n"
+                "the image is softer than a native FSR integration would be.\n\n"
+                "Upscaling also substitutes the swapchain's backbuffers, which\n"
+                "is the most invasive thing this bridge does, and BeamNG's UI is\n"
+                "upscaled along with the scene as a result.\n\n"
+                "Read docs/LIMITATIONS.md sections 1 and 11 first. If you only\n"
+                "want a frame-rate gain, the frame generation product is the\n"
+                "safer and stronger choice.",
     },
 }
 

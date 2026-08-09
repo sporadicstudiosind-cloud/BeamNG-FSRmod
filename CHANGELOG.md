@@ -29,18 +29,28 @@ the driver provides it.
   the application no way to request one; `numGeneratedFrames` arrives already
   decided on the dispatch callback.
 
-### AMD FSR Upscaling — does not execute
+### AMD FSR Upscaling — complete end to end
 
-The FSR context, dispatch, planner, version selection, settings and UI are all
-present, and nothing dispatches them. Presenting more pixels than BeamNG
-rendered requires substituting the swapchain's backbuffers, which this bridge
-does not do. Frame generation needs none of that, which is why one product runs
-and the other does not.
+Runs through the same Present tick, before frame generation. Made possible by
+backbuffer substitution: the real swapchain stays at display resolution, BeamNG
+is handed textures the bridge owns at render resolution in place of its
+backbuffers, and `GetDesc` reports the smaller size so the engine sizes its
+viewports and render targets to match. FSR reads the substitute and writes the
+real backbuffer at Present.
 
-The bridge does not paper over this: both upscaling capabilities are marked
-unavailable at startup with that reason, the planner refuses, the panel leads
-with a banner, and the status pill reads *inactive*. See `LIMITATIONS.md` §11
-for the full account and `FUTURE_WORK.md` §0 for the design that would close it.
+This is the most invasive mechanism in the bridge and is treated as such: it is
+refused in safe mode, refused at a 1.0x ratio, refused unless the fallback blit
+was created first, and entirely absent unless upscaling is switched on — with it
+off, the swapchain proxy is a pure pass-through.
+
+`PresentBlit` is that fallback: a fullscreen bilinear stretch, compiled at load
+time through d3dcompiler_47.dll. Once the game has stopped writing the real
+backbuffer, something must, every frame. It means a frame FSR could not produce
+is soft rather than absent.
+
+Two consequences worth knowing before enabling it: BeamNG's UI is upscaled along
+with the scene, and FSR runs without camera jitter because BeamNG exposes no
+hook for one. Frame generation has neither drawback and is the stronger product.
 
 ### The beacon publishes two targets
 
@@ -85,7 +95,8 @@ What *was* verified:
 
 What is not:
 
-- no frame has ever been executed — no allocator reset, no fence signalled;
+- no frame has ever been executed — no allocator reset, no fence signalled, no
+  barrier run, no substitute texture ever handed to a game;
 - three BeamNG behaviours are assumed with UI overrides rather than known: the
   depth convention, the motion-vector encoding, and the Direct3D 12 resource
   state its PostFX leaves a render target in;

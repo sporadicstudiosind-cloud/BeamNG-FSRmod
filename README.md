@@ -47,7 +47,7 @@ the audit table below, stated precisely. Everything else is marked NOT TESTED.
 | | Assessment |
 | --- | --- |
 | **FSR Frame Generation** | The strongest feature and the one that is complete. Frame generation does not need camera jitter, and everything it does need can be obtained. A Present hook drives it every frame; AMD's interpolation swapchain presents the result. This is what to use. |
-| **FSR Upscaling** | **Does not execute in this build.** Needs backbuffer substitution, which is not implemented (`LIMITATIONS.md` §11). It would also run **without camera jitter**, because BeamNG exposes no hook for it — materially softer than a native FSR integration, structural, and unfixable from the mod side. |
+| **FSR Upscaling** | Runs, via backbuffer substitution: the game renders into textures the bridge owns at render resolution and FSR writes the real backbuffer at display resolution. Runs **without camera jitter**, because BeamNG exposes no hook for it — materially softer than a native FSR integration, structural, and unfixable from the mod side. BeamNG's UI is upscaled along with the scene. |
 | **Vulkan / D3D11** | Impossible. AMD ships no Vulkan FSR backend and FSR 3.1+ requires D3D12. The mod detects the renderer and disables itself with an explanation. |
 | **AMD's driver-side FSR 4 upgrade** | BeamNG cannot qualify. AMD explicitly excludes third-party integrations. |
 
@@ -153,10 +153,11 @@ a command was run and its output checked, not that the code looks right.
 | FSR API usage is real and current | ✅ | ✅ compiles against AMD FSR SDK 2.3.0's actual headers | — | No API invented; SDK cloned and read |
 | DXGI proxy (`dxgi.dll`) | ✅ | ✅ builds; export table matches system DLL | Windows x64 | Full `IDXGIFactory..7` chain wrapped |
 | D3D12 proxy (`d3d12.dll`) | ✅ | ✅ builds; export table matches system DLL | Windows x64 | Base `ID3D12Device` only — see LIMITATIONS §4 |
-| **Per-frame execution path** | ✅ frame generation only | ⚠️ compile-verified only | DX12 | `IDXGISwapChain4` proxy; Present is the tick. Drives IPC, planning, beacon resolution and dispatch |
+| **Per-frame execution path** | ✅ both products | ⚠️ compile-verified only | DX12 | `IDXGISwapChain4` proxy; Present is the tick. Drives IPC, planning, beacon resolution and dispatch |
 | FSR frame generation | ✅ | ⚠️ compile-verified only | DX12; ML needs RX 9000 + Win 11 | Wraps AMD's interpolation swapchain, prepares and configures every frame |
-| FSR upscaling integration | ⚠️ **does not execute** | ✅ the gap is asserted at runtime | DX12; SM 6.2 / 6.6 | Context, dispatch and planner are real and unused: there is no backbuffer substitution to give them an input and an output. LIMITATIONS §11 |
-| Backbuffer substitution (what upscaling needs) | ❌ not implemented | — | — | The one piece missing for product 2. FUTURE_WORK.md |
+| FSR upscaling integration | ✅ | ⚠️ compile-verified only | DX12; SM 6.2 / 6.6 | **Runs without camera jitter** — LIMITATIONS §1. Substitutes the backbuffers |
+| Backbuffer substitution | ✅ | ⚠️ compile-verified only; **never executed** | DX12 | The most invasive mechanism here. Opt-in with upscaling, refused unless the fallback blit exists first, and a pure pass-through when off. LIMITATIONS §11 |
+| Fallback present blit | ✅ | ⚠️ compile-verified only | DX12 | Guarantees a frame reaches the screen when FSR cannot run, so a missing dispatch is a soft image and not a black screen |
 | Command recording for FSR's own work | ✅ | ✅ ring logic reviewed; allocator reuse is fence-gated | DX12 | Three-slot allocator/list/fence ring on the game's queue |
 | Runtime version discovery + selection | ✅ | ⚠️ compile-verified only | — | AMD's `ffxQuery` / `ffxOverrideVersion`; nothing hardcoded |
 | GPU / API / OS / SM detection | ✅ | ✅ policy layer unit-tested | — | Adapter matched by LUID, not index |
@@ -186,17 +187,22 @@ a command was run and its output checked, not that the code looks right.
 
 ### The honest summary
 
-**Frame generation is complete end to end and upscaling is not.** That is the
-single most important line in this table.
+**Both products are now complete end to end, and neither has executed a single
+frame.** Those two statements are equally important and the second is the one
+people skip.
 
-Frame generation has every piece: AMD's interpolation swapchain is installed
-when BeamNG creates its own, a Present hook drives the frame, settings arrive
-from the UI, the beacon targets are located, and the prepare dispatch is
-recorded and submitted. Upscaling has a real FSR context and a real dispatch
-that nothing calls, because presenting more pixels than BeamNG rendered needs a
-backbuffer-substitution layer this build does not have. The bridge asserts that
-gap at startup and the panel leads with it, so the product cannot appear to be
-working when it is not.
+Every piece is wired: AMD's interpolation swapchain is installed when BeamNG
+creates its own, backbuffer substitution puts the game's rendering into textures
+the bridge owns, a Present hook drives the frame, settings arrive from the UI,
+the beacon targets are located, and both dispatches are recorded and submitted.
+None of it has run on a GPU. No allocator has been reset, no fence signalled, no
+barrier executed.
+
+Backbuffer substitution deserves singling out as the riskiest thing in the
+repository. It changes what BeamNG believes its swapchain is, and the failure
+mode is a black screen rather than a degraded image. It is therefore refused
+unless the fallback blit was created first, refused at a 1.0× ratio, refused in
+safe mode, and completely absent unless upscaling is switched on.
 
 The decision logic — the part where a mistake means promising a user something
 their hardware cannot do — is covered by 153 tests that run without a GPU.

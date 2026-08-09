@@ -20,20 +20,24 @@
 // needs are complete and no longer being written.
 #pragma once
 
+#include <d3d12.h>
 #include <dxgi1_5.h>
 
 #include <atomic>
+#include <vector>
+
+#include "beamng_fsr/result.hpp"
 
 namespace bfsr {
 
-/// Called on the game's thread immediately before each Present, with the
-/// swapchain the game is presenting through. Must not throw.
-using PresentHook = void (*)(IDXGISwapChain4* swapChain, UINT syncInterval, UINT flags,
-                             void* context);
+class SwapChainProxy;
+
+/// Called on the game's thread immediately before each Present. Must not throw.
+using PresentHook = void (*)(SwapChainProxy* proxy, UINT syncInterval, UINT flags, void* context);
 
 /// Called immediately before ResizeBuffers, so FSR resources sized against the
 /// old surfaces can be released while they are still valid.
-using ResizeHook = void (*)(IDXGISwapChain4* swapChain, void* context);
+using ResizeHook = void (*)(SwapChainProxy* proxy, void* context);
 
 /// Pass-through IDXGISwapChain4 wrapping whatever the game was going to
 /// present through.
@@ -53,6 +57,47 @@ public:
     /// Stops the hooks firing without unwrapping. Used during shutdown, where
     /// the runtime is being torn down but the game may still present.
     void detachHooks() noexcept;
+
+    // -----------------------------------------------------------------------
+    // Backbuffer substitution — what makes upscaling possible.
+    //
+    // Upscaling means presenting more pixels than the game rendered, and a
+    // DXGI-level layer has exactly one way to arrange that: let the real
+    // swapchain stay at display resolution, hand the game textures of our own
+    // at render resolution in place of its backbuffers, and report the smaller
+    // size from GetDesc so the engine sizes its viewports, depth buffer and
+    // render targets to match. At Present, FSR reads the substitute and writes
+    // the real backbuffer.
+    //
+    // This is the highest-risk mechanism in the bridge and it is strictly
+    // opt-in: with substitution off, every method here is a plain forward and
+    // the proxy behaves exactly as it does for frame generation alone.
+    //
+    // One property makes it far safer than it looks: Direct3D 12 requires an
+    // application to transition a backbuffer to PRESENT before presenting it.
+    // The game believes the substitutes are backbuffers, so it does — which
+    // means their resource state at Present is *known*, not assumed. That is
+    // the opposite of the beacon situation (LIMITATIONS.md section 5).
+    // -----------------------------------------------------------------------
+
+    /// `ratio` is AMD's per-dimension divisor: render = display / ratio.
+    /// Returns a failure and changes nothing if the substitutes cannot be
+    /// created, leaving the proxy a pass-through.
+    Result enableSubstitution(ID3D12Device* device, float ratio);
+    void disableSubstitution();
+
+    [[nodiscard]] bool substituting() const noexcept { return !substitutes_.empty(); }
+    /// The texture the game most recently rendered into — FSR's colour input.
+    [[nodiscard]] ID3D12Resource* currentSubstitute() const noexcept;
+    /// The real swapchain's current backbuffer — FSR's output. Returns a
+    /// reference the caller must release.
+    [[nodiscard]] ID3D12Resource* acquireRealBackBuffer() const;
+
+    [[nodiscard]] uint32_t renderWidth() const noexcept { return renderWidth_; }
+    [[nodiscard]] uint32_t renderHeight() const noexcept { return renderHeight_; }
+    [[nodiscard]] uint32_t presentWidth() const noexcept { return presentWidth_; }
+    [[nodiscard]] uint32_t presentHeight() const noexcept { return presentHeight_; }
+    [[nodiscard]] DXGI_FORMAT format() const noexcept { return format_; }
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override;
     ULONG STDMETHODCALLTYPE AddRef() override;
@@ -120,11 +165,30 @@ public:
 private:
     ~SwapChainProxy();
 
+    Result createSubstitutes();
+    /// Rewrites a resize request from the game's coordinates to the real
+    /// swapchain's. See the definition for the rule and why it is ambiguous.
+    HRESULT resizeCommon(UINT& width, UINT& height);
+    void releaseSubstitutes();
+    /// Re-reads the real swapchain's size and recomputes the render size from
+    /// the stored ratio.
+    void refreshSizes();
+
     std::atomic<long> refCount_{1};
     IDXGISwapChain4* real_ = nullptr;
     std::atomic<PresentHook> present_{nullptr};
     std::atomic<ResizeHook> resize_{nullptr};
     void* context_ = nullptr;
+
+    ID3D12Device* device_ = nullptr;
+    std::vector<ID3D12Resource*> substitutes_;
+    uint32_t substituteIndex_ = 0;
+    float ratio_ = 1.0f;
+    uint32_t renderWidth_ = 0;
+    uint32_t renderHeight_ = 0;
+    uint32_t presentWidth_ = 0;
+    uint32_t presentHeight_ = 0;
+    DXGI_FORMAT format_ = DXGI_FORMAT_UNKNOWN;
 };
 
 } // namespace bfsr

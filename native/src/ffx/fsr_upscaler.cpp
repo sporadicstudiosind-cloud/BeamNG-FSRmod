@@ -189,9 +189,15 @@ Result FsrUpscaler::dispatch(const UpscaleFrameInputs& in, const UpscaleSettings
     desc.header.pNext = nullptr;
     desc.commandList = in.commandList;
 
-    desc.color = ffxApiGetResourceDX12(in.color, FFX_API_RESOURCE_STATE_COMPUTE_READ);
-    desc.depth = ffxApiGetResourceDX12(in.depth, FFX_API_RESOURCE_STATE_COMPUTE_READ);
-    desc.motionVectors = ffxApiGetResourceDX12(in.motionVectors, FFX_API_RESOURCE_STATE_COMPUTE_READ);
+    // The colour input is a substituted backbuffer, so its state is known
+    // rather than assumed: Direct3D 12 requires an application to transition a
+    // backbuffer to PRESENT before presenting it, and BeamNG believes this
+    // texture is one. Depth and motion vectors come from the PostFX beacons,
+    // whose state BeamNG does not document — those use the calibration setting.
+    const uint32_t beaconState = beaconResourceState(settings.calibration);
+    desc.color = ffxApiGetResourceDX12(in.color, FFX_API_RESOURCE_STATE_PRESENT);
+    desc.depth = ffxApiGetResourceDX12(in.depth, beaconState);
+    desc.motionVectors = ffxApiGetResourceDX12(in.motionVectors, beaconState);
     desc.output = ffxApiGetResourceDX12(in.output, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
     desc.exposure = in.exposure
                         ? ffxApiGetResourceDX12(in.exposure, FFX_API_RESOURCE_STATE_COMPUTE_READ)
