@@ -321,6 +321,12 @@ HRESULT STDMETHODCALLTYPE SwapChainProxy::GetRotation(DXGI_MODE_ROTATION* rotati
 // --- IDXGISwapChain2 -------------------------------------------------------
 
 HRESULT STDMETHODCALLTYPE SwapChainProxy::SetSourceSize(UINT width, UINT height) {
+    // Under substitution the game's notion of "source" is one of our textures,
+    // not a region of the real swapchain — and FSR always writes the real
+    // backbuffer in full. Forwarding a render-resolution size would tell DXGI
+    // to present only the top-left corner of a frame that fills it, so this is
+    // accepted and dropped rather than passed on.
+    if (substituting()) return S_OK;
     return real_->SetSourceSize(width, height);
 }
 
