@@ -1,0 +1,5 @@
+{
+  "module": "framegen",
+  "version": "0.2.0",
+  "_comment": "Presence of this file is what tells the shared bridge runtime that the AMD FSR Frame Generation product is installed. Delete it to disable frame generation without removing anything else; the runtime then never creates a frame-generation context, never reads its settings, and never wraps the swapchain."
+}

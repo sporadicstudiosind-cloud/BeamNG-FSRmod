@@ -1,0 +1,12 @@
+{
+  "beamng_fsr_framegen": {
+    "modname": "beamng_fsr_framegen",
+    "title": "AMD FSR Frame Generation",
+    "authors": "BeamNG FSR Bridge contributors",
+    "tagline": "AMD FSR Frame Generation for BeamNG.drive, with Anti-Lag 2",
+    "description": "Adds AMD FSR Frame Generation to BeamNG.drive's Direct3D 12 renderer, with ML frame generation on RDNA 4 hardware, analytical frame generation on everything else that qualifies, and AMD Radeon Anti-Lag 2 where the driver provides it. Works entirely on its own — the separate AMD FSR Upscaling product is optional and neither requires the other. This mod ZIP is only half of the integration: BeamNG's Lua sandbox cannot load native code, so the frame generation itself runs in a native bridge installed alongside BeamNG.drive.exe. See docs/INSTALL.md. Without the bridge this mod does nothing except tell you it is missing.",
+    "version": "0.2.0",
+    "license": "MIT (mod). AMD FSR runtime redistributed under AMD's own licence — see THIRD_PARTY_NOTICES.md.",
+    "requirements": "Windows 10/11 (Windows 11 for ML frame generation), BeamNG.drive with the Direct3D 12 renderer, the native FSR bridge installed"
+  }
+}

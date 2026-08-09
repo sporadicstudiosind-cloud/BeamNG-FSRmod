@@ -1,0 +1,29 @@
+# Build output
+build/
+build-*/
+out/
+dist/
+*.o
+*.obj
+*.lib
+*.exp
+*.pdb
+*.ilk
+
+# Fetched third-party SDKs — never vendored, see docs/LEGAL.md
+third_party/FidelityFX-SDK/
+third_party/*.zip
+
+# Packaging output
+packaging/staging/
+*.zip
+!mod/**/*.zip
+
+# Test scratch files
+native/bfsr_test_*.json
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp

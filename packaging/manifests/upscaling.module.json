@@ -1,0 +1,5 @@
+{
+  "module": "upscaling",
+  "version": "0.2.0",
+  "_comment": "Presence of this file is what tells the shared bridge runtime that the AMD FSR Upscaling product is installed. Delete it to disable upscaling without removing anything else; the runtime then never creates an upscaling context and never reads its settings."
+}

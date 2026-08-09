@@ -1,0 +1,296 @@
+<!--
+  SPDX-License-Identifier: MIT
+  Part of BeamNG FSR Bridge. See LICENSE at the repository root.
+
+  One screen. The three controls that matter are at the top; calibration and
+  debugging are collapsed because they exist for correcting BeamNG's
+  undocumented buffer encodings, not for everyday use.
+
+  Every control that can be unavailable renders the bridge's own explanation
+  beneath it. A greyed-out box with no reason is the failure mode this layout
+  exists to avoid.
+-->
+<div class="fsr-app">
+  <link rel="stylesheet" href="/ui/modules/apps/FsrFrameGeneration/app.css">
+  <script src="/ui/modules/apps/FsrFrameGeneration/ui_shared.js"></script>
+
+  <header class="fsr-head">
+    <h3>AMD FSR Frame Generation</h3>
+    <span class="fsr-pill" ng-if="ready()">active</span>
+    <span class="fsr-pill fsr-pill-off" ng-if="!ready()">inactive</span>
+  </header>
+
+  <!-- Blocking conditions come first: nothing below matters until they clear. -->
+  <div class="fsr-banner fsr-error" ng-if="status && !status.common.bridgeLoaded">
+    <strong>Native bridge not loaded.</strong>
+    <p>{{status.common.initFailureReason}}</p>
+  </div>
+
+  <div class="fsr-banner fsr-error"
+       ng-if="status.common.bridgeLoaded && !status.moduleInstalled">
+    <strong>Frame generation is not installed on the bridge side.</strong>
+    <p>The bridge is running but did not find this product's module manifest.
+       Copy the frame generation bridge folder over
+       <code>BeamNG.drive.exe</code>'s directory again.</p>
+  </div>
+
+  <div class="fsr-banner fsr-error"
+       ng-if="status.common.bridgeLoaded && status.common.initFailureReason">
+    <strong>Could not start.</strong>
+    <p>{{status.common.initFailureReason}}</p>
+  </div>
+
+  <div class="fsr-banner fsr-warn" ng-if="status.safeModeActive">
+    <strong>Safe mode is active.</strong>
+    <p>The previous session did not shut down cleanly, so frame generation is off.
+       Your settings were kept. Check <code>beamng_fsr/bridge.log</code>, then clear it.</p>
+    <button ng-click="clearSafeMode()">Clear safe mode</button>
+  </div>
+
+  <!-- ============================ main ============================ -->
+  <section ng-show="settings">
+
+    <div class="fsr-row fsr-row-primary">
+      <label>Frame generation</label>
+      <input type="checkbox" ng-model="settings.enabled" ng-change="onChange('enabled')"
+             ng-disabled="status.safeModeActive || !anyAvailable()">
+    </div>
+
+    <div class="fsr-row">
+      <label>Implementation</label>
+      <select ng-model="settings.implementation" ng-change="onChange('implementation')"
+              ng-disabled="!settings.enabled || !anyAvailable()">
+        <option value="auto">Auto (recommended)</option>
+        <option value="ml" ng-disabled="!available('framegen_ml')">
+          ML — FSR Frame Generation 4.x "Redstone"
+        </option>
+        <option value="analytical" ng-disabled="!available('framegen_analytical')">
+          Analytical — FSR Frame Generation 3.1.x
+        </option>
+        <option value="disabled">Off</option>
+      </select>
+    </div>
+
+    <p class="fsr-reason" ng-if="!available('framegen_ml')">
+      <strong>ML frame generation unavailable:</strong> {{reason('framegen_ml')}}
+    </p>
+    <p class="fsr-reason" ng-if="!available('framegen_analytical')">
+      <strong>Analytical frame generation unavailable:</strong> {{reason('framegen_analytical')}}
+    </p>
+
+    <div class="fsr-row fsr-row-primary">
+      <label>AMD Radeon Anti-Lag 2</label>
+      <input type="checkbox" ng-model="settings.antiLag2" ng-change="onChange('antiLag2')"
+             ng-disabled="!available('antilag2')">
+    </div>
+    <p class="fsr-note" ng-if="available('antilag2')">
+      AMD recommends pairing frame generation with Anti-Lag 2 to offset the
+      latency it adds.
+    </p>
+    <p class="fsr-reason" ng-if="!available('antilag2')">{{reason('antilag2')}}</p>
+
+    <div class="fsr-row" ng-if="settings.antiLag2">
+      <label>Anti-Lag frame cap
+        <span class="fsr-value">{{settings.antiLagMaxFps ? settings.antiLagMaxFps : 'off'}}</span>
+      </label>
+      <input type="range" min="0" max="360" step="1"
+             ng-model="settings.antiLagMaxFps" ng-change="onSlider('antiLagMaxFps')">
+    </div>
+
+    <!-- Live state, kept to one line each. -->
+    <div class="fsr-live" ng-if="ready()">
+      <div><span>Running</span><b>{{status.plan.versionName || status.plan.backend}}</b></div>
+      <div><span>Rendered</span><b>{{metric(status.common.metrics.renderedFps, ' fps')}}</b></div>
+      <div><span>Displayed</span><b>{{metric(status.common.metrics.displayedFps, ' fps')}}</b></div>
+      <div><span>Multiplier</span><b>{{multiplierText()}}</b></div>
+      <div ng-if="status.suppressReason && status.suppressReason !== 'none'">
+        <span>Paused</span><b>{{status.suppressReason}}</b>
+      </div>
+    </div>
+
+    <div class="fsr-banner fsr-warn" ng-if="belowAmdMinimum()">
+      <p>Rendered frame rate is below the {{amdMinimumFps()}} fps AMD documents
+         for this implementation. Generated frames may show noticeable artefacts.</p>
+    </div>
+
+    <div class="fsr-banner fsr-info" ng-repeat="n in notes('downgrades')"><p>{{n}}</p></div>
+    <div class="fsr-banner fsr-warn" ng-repeat="n in notes('warnings')"><p>{{n}}</p></div>
+  </section>
+
+  <!-- ========================= diagnostics ========================= -->
+  <section>
+    <button class="fsr-disclose" ng-click="showDiagnostics = !showDiagnostics">
+      {{showDiagnostics ? '▾' : '▸'}} Diagnostics
+    </button>
+
+    <div ng-show="showDiagnostics">
+      <table class="fsr-diag">
+        <tr><td>GPU</td><td>{{status.common.environment.gpu.name || 'unknown'}}</td></tr>
+        <tr><td>Graphics API</td><td>{{status.common.environment.system.renderer}}</td></tr>
+        <tr><td>Shader model</td><td>{{status.common.environment.system.highestShaderModel}}</td></tr>
+        <tr><td>Windows build</td><td>{{status.common.environment.system.windowsBuild}}</td></tr>
+        <tr><td>Bridge</td><td>{{status.common.bridgeVersion}}</td></tr>
+        <tr><td>Upscaling product</td>
+            <td>{{upscalingInstalled() ? 'installed' : 'not installed (optional)'}}</td></tr>
+        <tr class="fsr-sep"><td colspan="2"></td></tr>
+        <tr><td>Depth source</td><td>{{status.common.depthSource}}</td></tr>
+        <tr><td>Motion vectors</td><td>{{status.common.motionVectorSource}}</td></tr>
+        <tr class="fsr-sep"><td colspan="2"></td></tr>
+        <!-- Rendered and displayed are never merged into one figure: frame
+             generation raises the second without raising the first. -->
+        <tr><td>Rendered FPS</td><td>{{metric(status.common.metrics.renderedFps, ' fps')}}</td></tr>
+        <tr><td>Displayed FPS</td><td>{{metric(status.common.metrics.displayedFps, ' fps')}}</td></tr>
+        <tr><td>1% low</td><td>{{metric(status.common.metrics.onePercentLowFps, ' fps')}}</td></tr>
+        <tr><td>0.1% low</td><td>{{metric(status.common.metrics.pointOnePercentLowFps, ' fps')}}</td></tr>
+        <tr><td>Frame time</td><td>{{metric(status.common.metrics.frameTimeMs, ' ms', 2)}}</td></tr>
+        <tr><td>GPU cost</td><td>{{metric(status.gpuMs, ' ms', 2)}}</td></tr>
+        <tr><td>VRAM</td><td>{{megabytes(status.vramBytes)}}</td></tr>
+        <tr><td>Frames generated</td><td>{{status.framesGenerated}}</td></tr>
+        <tr><td>Anti-Lag 2</td><td>{{status.antiLagActive ? 'active' : 'inactive'}}</td></tr>
+      </table>
+
+      <div class="fsr-decisions" ng-if="notes('decisions').length">
+        <h4>Why Auto chose this</h4>
+        <p ng-repeat="n in notes('decisions')">{{n}}</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========================== advanced =========================== -->
+  <section ng-show="settings">
+    <button class="fsr-disclose" ng-click="showAdvanced = !showAdvanced">
+      {{showAdvanced ? '▾' : '▸'}} Advanced
+    </button>
+
+    <div ng-show="showAdvanced">
+      <div class="fsr-row">
+        <label>Implementation version</label>
+        <select ng-model="settings.versionId" ng-change="onChange('versionId')"
+                ng-disabled="!versions().length">
+          <option value="auto">Auto (let AMD choose)</option>
+          <option ng-repeat="v in versions()" value="{{v.id}}">
+            {{v.name}}{{v.ml ? '  [ML]' : ''}}
+          </option>
+        </select>
+      </div>
+      <p class="fsr-note" ng-if="installed() && !versions().length">
+        The installed AMD FSR runtime reports no frame-generation provider for
+        this GPU and driver.
+      </p>
+
+      <div class="fsr-row">
+        <label>Async compute</label>
+        <input type="checkbox" ng-model="settings.asyncCompute"
+               ng-change="onChange('asyncCompute')"
+               ng-disabled="settings.diagnostics.forceCompatibilityMode">
+      </div>
+
+      <div class="fsr-row">
+        <label>Composite UI after interpolation</label>
+        <input type="checkbox" ng-model="settings.uiComposition"
+               ng-change="onChange('uiComposition')">
+      </div>
+
+      <h4>Calibration</h4>
+      <p class="fsr-note">
+        BeamNG documents neither its depth nor its motion-vector encoding. These
+        correct it — turn on the debug view to check them against AMD's own
+        visualisation.
+      </p>
+
+      <div class="fsr-row">
+        <label>Depth convention</label>
+        <select ng-model="settings.calibration.depthConvention"
+                ng-change="onChange('calibration.depthConvention')">
+          <option value="auto">Auto (assume reversed-Z)</option>
+          <option value="reversedZ">Reversed-Z</option>
+          <option value="standardZ">Standard Z</option>
+        </select>
+      </div>
+      <div class="fsr-row">
+        <label>Infinite far plane</label>
+        <input type="checkbox" ng-model="settings.calibration.depthInfinite"
+               ng-change="onChange('calibration.depthInfinite')">
+      </div>
+      <div class="fsr-row">
+        <label>Motion vectors are UV space</label>
+        <input type="checkbox" ng-model="settings.calibration.motionVectorsAreUvSpace"
+               ng-change="onChange('calibration.motionVectorsAreUvSpace')">
+      </div>
+      <div class="fsr-row">
+        <label>Flip motion vector Y</label>
+        <input type="checkbox" ng-model="settings.calibration.motionVectorFlipY"
+               ng-change="onChange('calibration.motionVectorFlipY')">
+      </div>
+      <div class="fsr-row">
+        <label>MV scale X <span class="fsr-value">{{settings.calibration.motionVectorScaleX | number:2}}</span></label>
+        <input type="range" min="-2" max="2" step="0.01"
+               ng-model="settings.calibration.motionVectorScaleX"
+               ng-change="onSlider('calibration.motionVectorScaleX')">
+      </div>
+      <div class="fsr-row">
+        <label>MV scale Y <span class="fsr-value">{{settings.calibration.motionVectorScaleY | number:2}}</span></label>
+        <input type="range" min="-2" max="2" step="0.01"
+               ng-model="settings.calibration.motionVectorScaleY"
+               ng-change="onSlider('calibration.motionVectorScaleY')">
+      </div>
+
+      <div class="fsr-row">
+        <label>Beacon resource state</label>
+        <select ng-model="settings.calibration.beaconResourceState"
+                ng-change="onChange('calibration.beaconResourceState')">
+          <option value="pixelComputeRead">Pixel + compute read (default)</option>
+          <option value="pixelRead">Pixel read</option>
+          <option value="computeRead">Compute read</option>
+          <option value="renderTarget">Render target</option>
+          <option value="genericRead">Generic read</option>
+          <option value="common">Common</option>
+        </select>
+      </div>
+      <p class="fsr-note">
+        Direct3D 12 cannot be asked what state a texture is in, and BeamNG does
+        not document what its PostFX system leaves one in. FSR transitions the
+        beacon targets from whatever is declared here. If the image is wrong or
+        the log reports barrier errors, this is the setting to try.
+      </p>
+
+      <h4>Debugging</h4>
+      <div class="fsr-row">
+        <label>FSR debug view</label>
+        <input type="checkbox" ng-model="settings.diagnostics.debugView"
+               ng-change="onChange('diagnostics.debugView')">
+      </div>
+      <div class="fsr-row">
+        <label>Benchmark mode</label>
+        <input type="checkbox" ng-model="settings.diagnostics.benchmarkMode"
+               ng-change="onChange('diagnostics.benchmarkMode')">
+      </div>
+      <div class="fsr-row">
+        <label>Log level</label>
+        <select ng-model="settings.diagnostics.logLevel"
+                ng-change="onChange('diagnostics.logLevel')">
+          <option value="error">error</option>
+          <option value="warn">warn</option>
+          <option value="info">info</option>
+          <option value="debug">debug</option>
+          <option value="trace">trace</option>
+        </select>
+      </div>
+      <div class="fsr-row">
+        <label>Force compatibility mode</label>
+        <input type="checkbox" ng-model="settings.diagnostics.forceCompatibilityMode"
+               ng-change="onChange('diagnostics.forceCompatibilityMode')">
+      </div>
+      <p class="fsr-note">
+        Compatibility mode disables async compute and version pinning without
+        discarding either setting. Try it before reporting a crash.
+      </p>
+
+      <div class="fsr-actions">
+        <button ng-click="exportDiagnostics()">Export report</button>
+        <button ng-click="reset()">Reset settings</button>
+      </div>
+      <p class="fsr-note" ng-if="exportedTo">Written to <code>{{exportedTo}}</code></p>
+    </div>
+  </section>
+</div>

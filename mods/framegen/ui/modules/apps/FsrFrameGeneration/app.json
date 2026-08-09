@@ -1,0 +1,8 @@
+{
+  "name": "AMD FSR Frame Generation",
+  "author": "BeamNG FSR Bridge contributors",
+  "description": "Adds AMD FSR Frame Generation. Works on its own; the FSR Upscaling product is optional and separate.",
+  "directive": "fsr-frame-generation",
+  "domElement": "<fsr-frame-generation>",
+  "css": { "min-width": "420px", "min-height": "340px", "width": "480px", "height": "560px" }
+}
