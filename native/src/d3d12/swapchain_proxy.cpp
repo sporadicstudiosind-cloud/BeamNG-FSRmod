@@ -40,6 +40,11 @@ SwapChainProxy::SwapChainProxy(IDXGISwapChain4* real, PresentHook present, Resiz
 }
 
 SwapChainProxy::~SwapChainProxy() {
+    // The substitutes and the device reference are owned here, not by the
+    // runtime: the game holds the last reference to this proxy, so this is the
+    // only place their lifetime reliably ends.
+    releaseSubstitutes();
+    if (device_) device_->Release();
     if (real_) real_->Release();
 }
 
