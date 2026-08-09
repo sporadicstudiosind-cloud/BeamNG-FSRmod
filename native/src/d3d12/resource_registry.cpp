@@ -106,17 +106,19 @@ void ResourceRegistry::recordTexture(ID3D12Resource* resource, const D3D12_RESOU
 
     std::lock_guard<std::mutex> lock(mutex_);
     textures_[resource] = describe(resource, desc, ++sequence_);
+    ++generation_;
 }
 
 void ResourceRegistry::forget(ID3D12Resource* resource) {
     if (!resource) return;
     std::lock_guard<std::mutex> lock(mutex_);
-    textures_.erase(resource);
+    if (textures_.erase(resource) != 0) ++generation_;
 }
 
 void ResourceRegistry::clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     textures_.clear();
+    ++generation_;
 }
 
 std::vector<ResourceDescriptor> ResourceRegistry::snapshot() const {
@@ -130,6 +132,11 @@ std::vector<ResourceDescriptor> ResourceRegistry::snapshot() const {
 size_t ResourceRegistry::size() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return textures_.size();
+}
+
+uint64_t ResourceRegistry::generation() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return generation_;
 }
 
 void attachDestructionWatcher(ID3D12Resource* resource, ResourceRegistry* registry) {

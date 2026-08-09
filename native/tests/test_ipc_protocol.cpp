@@ -19,11 +19,16 @@ SharedFrameState sharedState() {
     s.cameraNear = 0.05f;
     s.cameraFar = 12000.0f;
     s.cameraFovVerticalRadians = 1.05f;
-    s.beacon.valid = true;
-    s.beacon.width = 1600;
-    s.beacon.height = 900;
-    s.beacon.format = 2;
-    s.beacon.label = "fsrDepthMvBeacon";
+    s.depthBeacon.valid = true;
+    s.depthBeacon.width = 1600;
+    s.depthBeacon.height = 900;
+    s.depthBeacon.format = 2;
+    s.depthBeacon.label = "fsrDepthBeacon";
+    s.depthBeacon.ordinal = 0;
+    s.depthBeacon.expectedCount = 2;
+    s.motionBeacon = s.depthBeacon;
+    s.motionBeacon.label = "fsrMotionBeacon";
+    s.motionBeacon.ordinal = 1;
     return s;
 }
 
@@ -49,9 +54,19 @@ TEST(Ipc, FrameGenRequestRoundTrips) {
     CHECK(out.shared.paused);
     CHECK(out.shared.replay);
     CHECK(!out.shared.loading);
-    CHECK(out.shared.beacon.valid);
-    CHECK_EQ(out.shared.beacon.width, 1600u);
+    CHECK(out.shared.depthBeacon.valid);
+    CHECK_EQ(out.shared.depthBeacon.width, 1600u);
     CHECK_NEAR(out.shared.cameraNear, 0.05, 1e-6);
+
+    // The two beacons must survive the round trip as *distinct* signatures.
+    // Collapsing them would hand FSR the same texture as depth and motion.
+    CHECK(out.shared.motionBeacon.valid);
+    CHECK_EQ(out.shared.depthBeacon.ordinal, 0u);
+    CHECK_EQ(out.shared.motionBeacon.ordinal, 1u);
+    CHECK_EQ(out.shared.depthBeacon.expectedCount, 2u);
+    CHECK_EQ(out.shared.motionBeacon.expectedCount, 2u);
+    CHECK(out.shared.depthBeacon.label == "fsrDepthBeacon");
+    CHECK(out.shared.motionBeacon.label == "fsrMotionBeacon");
 }
 
 TEST(Ipc, UpscaleRequestRoundTrips) {
@@ -68,7 +83,8 @@ TEST(Ipc, UpscaleRequestRoundTrips) {
     CHECK(out.settings.implementation == UpscalerSelection::Analytical);
     CHECK(out.settings.quality == QualityMode::Balanced);
     CHECK_NEAR(out.settings.sharpness, 0.25, 1e-6);
-    CHECK(out.shared.beacon.valid);
+    CHECK(out.shared.depthBeacon.valid);
+    CHECK(out.shared.motionBeacon.valid);
 }
 
 TEST(Ipc, BothRequestsCarryTheSharedStateIndependently) {

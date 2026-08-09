@@ -141,6 +141,9 @@ end
 function M.onUpdate(dtReal)
   if not state.settings then return end
   core.tickCameraCut()
+  -- Advances the beacon's staged enable. Cheap and idempotent, so both
+  -- products can call it and whichever is installed keeps it moving.
+  core.tickBeacon()
 
   state.pushTimer = state.pushTimer + dtReal
   if state.pushTimer >= core.PUSH_INTERVAL then

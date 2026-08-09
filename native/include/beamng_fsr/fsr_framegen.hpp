@@ -113,6 +113,10 @@ public:
 
     [[nodiscard]] const std::string& activeVersionName() const noexcept { return versionName_; }
     [[nodiscard]] uint64_t generatedFrameCount() const noexcept { return generatedFrames_; }
+    /// The creation flags of the live context, for AMD's memory-usage query —
+    /// which must be asked about the same configuration that was created or it
+    /// answers about a different one.
+    [[nodiscard]] uint32_t createFlags() const noexcept { return createFlags_; }
 
     /// Frames AMD's swapchain asked for on the most recent dispatch.
     ///

@@ -2,6 +2,41 @@
 
 Ordered by value, with the reasoning for each.
 
+## 0. Backbuffer substitution — what makes upscaling execute
+
+**Why:** it is the single missing piece for product 2. Everything else about
+upscaling is built and unused: the FSR context, the dispatch, the version
+selection, the planner, the settings and the UI. What does not exist is a way to
+give the dispatch an input and an output (`LIMITATIONS.md` §11).
+
+**Work:** intercept `CreateSwapChainForHwnd`, create the *real* swapchain at
+display resolution, then hand BeamNG textures of the bridge's own at render
+resolution in place of its backbuffers:
+
+- `GetBuffer` returns the substitute textures.
+- `GetDesc`/`GetDesc1` report the *reduced* size, so the engine sizes its
+  viewports, depth buffer and render targets to match.
+- Present runs the FSR upscale from the substitute into the real backbuffer,
+  then forwards.
+- `ResizeBuffers`/`ResizeBuffers1` and fullscreen transitions recreate both
+  sides in step.
+
+The resource states are the bridge's own throughout, which removes the
+assumption §5 has to make for the beacons.
+
+**Why it was not done first:** it is the highest-risk component in the whole
+design. A wrong swapchain description gives a black screen rather than a
+degraded image, the substitution has to stay coherent across fullscreen
+transitions and resizes, and none of it could be tested in an environment with
+no GPU, no Windows and no BeamNG. Frame generation reaches the same goal —
+higher frame rate — through AMD's interpolation swapchain, which needs none of
+this, so it was built first and completely.
+
+It is also worth being clear about what upscaling would be worth once it runs:
+BeamNG exposes no camera-jitter hook, so FSR's temporal upscaler would run
+outside its designed operating conditions (`LIMITATIONS.md` §1). Frame
+generation is barely affected by that. Upscaling is.
+
 ## 1. Extend the device wrapper to `ID3D12Device1..14`
 
 **Why:** today only the base `ID3D12Device` is wrapped. If BeamNG creates render
@@ -16,6 +51,22 @@ same three creation calls plus their versioned variants
 **Why it was not done first:** it is ~70 forwarding methods of boilerplate, and
 the current behaviour fails safely and visibly rather than silently. The factory
 wrapper, where a gap *would* fail silently, is already complete.
+
+## 1b. Unpack the beacons in the bridge instead of writing two targets
+
+**Why:** the beacon costs two full-resolution `R32G32B32A32_FLOAT` writes per
+frame (`LIMITATIONS.md` §6). One packed target plus a small compute pass in the
+bridge that splits it into a depth texture and a motion-vector texture would
+halve the PostFX bandwidth and remove the creation-order identity trick
+entirely, since a single packed target is unambiguous on its own.
+
+**Work:** a compute shader compiled at load time through `D3DCompile`, a root
+signature, a PSO and a descriptor heap in the bridge, plus two owned output
+textures.
+
+**Why it was not done first:** it adds a shader pipeline to a component that
+currently has none, and the two-target approach is correct without it. This is
+an optimisation, not a fix.
 
 ## 2. Confirm the depth and motion-vector encodings
 

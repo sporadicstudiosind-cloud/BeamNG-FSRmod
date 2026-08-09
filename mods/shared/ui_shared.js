@@ -38,9 +38,30 @@ window.FsrShared = (function () {
       return f ? f.reason : '';
     },
 
+    /// True only when this product is *running*, not merely installed.
+    ///
+    /// The distinction matters: the bridge can be loaded and the product
+    /// installed while the resolved plan is inactive, in which case nothing is
+    /// executing. Reporting "active" then would be the panel claiming a result
+    /// it does not have. `installed()` covers the weaker question.
     ready: function (status) {
       return !!(status && status.common && status.common.bridgeLoaded &&
+                status.common.initialised && status.moduleInstalled &&
+                status.plan && status.plan.active);
+    },
+
+    /// The bridge is up and this product's half of it started. Used to decide
+    /// whether the diagnostics are worth showing, not whether FSR is running.
+    installed: function (status) {
+      return !!(status && status.common && status.common.bridgeLoaded &&
                 status.common.initialised && status.moduleInstalled);
+    },
+
+    /// Metrics are nested under common.metrics in the status document. Reading
+    /// them through here rather than inline stops a status that predates a
+    /// field from throwing on a missing intermediate object.
+    metrics: function (status) {
+      return (status && status.common && status.common.metrics) || {};
     },
 
     /// Renders a measured value, or an explicit "not measured" — never a zero

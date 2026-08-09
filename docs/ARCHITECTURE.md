@@ -47,7 +47,8 @@ without touching the other.
 │  │  SHARED (byte-identical in both ZIPs)                           │  │
 │  │    lua/ge/extensions/fsr_core/common.lua  state, IPC, beacon RC │  │
 │  │    lua/ge/extensions/fsr_core/beacon.lua  PostEffect lifecycle   │  │
-│  │    shaders/fsr/fsrBeaconP.hlsl            depth + velocity ──────┼──┼─┐
+│  │    shaders/fsr/fsrDepthBeaconP.hlsl       depth ─────────────────┼──┼─┐
+│  │    shaders/fsr/fsrMotionBeaconP.hlsl      velocity ──────────────┼──┼─┤
 │  │  FRAME GENERATION           │  UPSCALING                        │  │ │
 │  │    lua/.../fsr_fg/main.lua  │    lua/.../fsr_up/main.lua        │  │ │
 │  │    ui/.../FsrFrameGeneration│    ui/.../FsrUpscaling            │  │ │
@@ -57,6 +58,7 @@ without touching the other.
 │  ┌──────────── NATIVE HALF (Microsoft APIs only) ──────────────────┐  │ │
 │  │  dxgi.dll   → DxgiFactoryProxy    → sees swapchain creation     │  │ │
 │  │  d3d12.dll  → D3D12DeviceProxy    → sees texture creation ◄─────┼──┼─┘
+│  │  SwapChainProxy → Present, the per-frame tick                   │  │
 │  │                                                                  │  │
 │  │  beamng_fsr_bridge.dll   one runtime, two gated modules          │  │
 │  │    ModuleRegistry     which products declared themselves        │  │
@@ -66,8 +68,9 @@ without touching the other.
 │  │    FsrFrameGenerator  FG context + interpolation swapchain      │  │
 │  │    AntiLag2           AMD driver extension                      │  │
 │  │    resolveFrameGenPlan()                                        │  │
-│  │    ── upscaling module ─────────────────────────────────────    │  │
-│  │    FsrUpscaler        ffxDispatchDescUpscale                    │  │
+│  │    FrameCommandRing   FSR's own allocators/list/fence           │  │
+│  │    ── upscaling module (built, NOT executed — LIMITATIONS §11) ─ │  │
+│  │    FsrUpscaler        ffxDispatchDescUpscale — never dispatched  │  │
 │  │    resolveUpscalePlan()                                         │  │
 │  │    ── shared ───────────────────────────────────────────────    │  │
 │  │    ResourceRegistry   descriptions of live textures             │  │
@@ -112,14 +115,29 @@ A D3D12-level layer sees hundreds of textures a frame and cannot tell which is
 the depth buffer. Classifying by format and size is fragile and breaks whenever
 BeamNG changes a render target.
 
-So the mod half **publishes** them instead. A `PostEffect` copies
-`#prepass[Depth]` and `#VelocityBuffer[RT0]` into a render target this mod
-created, then sends that target's exact dimensions and format over IPC. The
-bridge then searches for a texture it has a description of, rather than
-inferring one from an engine it knows nothing about.
+So the mod half **publishes** them instead. Two `PostEffect` passes copy
+`#prepass[Depth]` and `#VelocityBuffer[RT0]` into render targets this mod
+created, then send those targets' exact dimensions and formats over IPC. The
+bridge then searches for textures it has a description of, rather than
+inferring them from an engine it knows nothing about.
 
 The identifying signature is created by us, not derived from BeamNG — which is
 what makes it survive BeamNG updates.
+
+**Two targets, not one.** FSR reads depth from channel 0 of one resource and the
+motion vector from channels 0 and 1 of another. A single packed RGBA target
+handed to both inputs would be read as a motion vector of
+`(depth, velocity.x)` — a plausible-looking image that is wrong. So depth and
+velocity are separate targets.
+
+That leaves them with identical descriptions, so they are told apart by creation
+order. Order is *established* rather than assumed: Torque allocates a
+PostEffect's target lazily on its first render, so the mod enables the depth
+pass alone for one frame and the motion pass on the next. Neither signature is
+published until both are up, and the matcher requires exactly the expected
+number of candidates before it calls a match Exact. Getting this backwards would
+feed depth in as motion vectors, which is why it is built to be deterministic
+instead of probable.
 
 `classifyHeuristically()` remains as a fallback for when the mod half is absent,
 and reports lower confidence. If it is ambiguous, FSR stays off rather than
@@ -146,7 +164,7 @@ this device has no provider, and the UI says exactly that.
 
 | Layer | Depends on | Tested |
 | --- | --- | --- |
-| `bfsr_core` — JSON, settings, capabilities, both planners, pacing, IPC protocol, beacon matching, module registry | nothing platform-specific | **146 unit tests, run in CI** |
+| `bfsr_core` — JSON, settings, capabilities, both planners, pacing, IPC protocol, beacon matching, module registry | nothing platform-specific | **153 unit tests, run in CI** |
 | `bfsr_bridge` — D3D12/DXGI proxies, FFX contexts, detection, runtime | D3D12, DXGI, AMD FSR | compile-verified against AMD's real headers |
 | stubs | Windows loader | export tables verified against the system DLLs |
 
@@ -168,18 +186,70 @@ Stated once and applied everywhere: **BeamNG must keep running.**
 
 FSR turning itself off is always preferable to a crash or a wrong image.
 
+## The per-frame driver
+
+Everything else in the bridge is driven by an event that happens once: device
+creation, factory creation, swapchain creation. FSR needs something that happens
+every frame — the prepare dispatch has to be recorded after the scene is drawn
+and before the frame is presented, and frame generation has to be reconfigured
+with a new frame ID each time.
+
+BeamNG exposes no render-loop hook to mods, so the only per-frame event a
+DXGI-level layer can legitimately observe is **Present**. `SwapChainProxy` is a
+pass-through `IDXGISwapChain4` that calls the runtime immediately before
+forwarding it.
+
+Present is also the correct point rather than merely the available one: by the
+time the game presents, the depth and velocity buffers are final and the beacon
+passes have already copied them.
+
+Composition order is load-bearing:
+
+```
+game  →  SwapChainProxy  →  AMD frame-interpolation swapchain  →  DXGI
+         (per-frame tick)    (schedules the generated frame)
+```
+
+Wrapping in the other order would prepare a frame that had already been
+presented.
+
+The whole `IDXGISwapChain..4` chain is implemented, for the same reason the DXGI
+factory proxy implements its whole chain: a partial wrapper fails
+`QueryInterface`, the game falls back to the unwrapped object, and Present stops
+reaching the hook — silently, with frame generation simply never running.
+
+FSR's own GPU work is recorded into the bridge's own command list, never one of
+BeamNG's: the game owns its allocators' reset points, and recording into a list
+it is about to reset is a use-after-free with GPU timing. `FrameCommandRing`
+holds three allocators with a fence each, so a slot is only reused once the GPU
+has signalled its previous submission.
+
 ## Frame generation flow
 
 ```
 game frame N
-  ├─ mod half: beacon PostEffect writes depth+velocity
-  ├─ bridge:   FrameGenerationGate decides allow/suppress/reset
-  ├─ bridge:   ffxDispatchDescFrameGenerationPrepareV2  (depth, MVs, camera)
-  ├─ bridge:   ffxConfigureDescFrameGeneration          (enable, frameID)
-  └─ Present → AMD's interpolation swapchain
+  ├─ mod half: two beacon PostEffects write depth and velocity
+  ├─ SwapChainProxy::Present  ── the tick ──┐
+  │    ├─ bridge: poll IPC (paced, not every frame) → settings, game state
+  │    ├─ bridge: resolve the beacon targets from the resource registry
+  │    ├─ bridge: resolveFrameGenPlan()
+  │    ├─ bridge: FrameGenerationGate decides allow/suppress/reset
+  │    ├─ bridge: ring.begin() → ffxDispatch…PrepareV2 → ring.submit()
+  │    └─ bridge: ffxConfigureDescFrameGeneration (enable, frameID)
+  └─ forwarded Present → AMD's interpolation swapchain
                  └─ calls back on its own thread
                       └─ ffxDispatch → interpolated frame, paced
 ```
+
+`configure` runs on every frame including suppressed ones: it is what tells
+AMD's swapchain *not* to interpolate this one, and skipping it would leave the
+previous frame's decision in force.
+
+**Upscaling has no equivalent flow.** It has a real FSR context and a real
+dispatch that nothing calls, because presenting more pixels than BeamNG rendered
+needs a backbuffer-substitution layer this build does not have. The bridge marks
+both upscaling capabilities unavailable at startup with that reason rather than
+letting the panel imply otherwise. See `LIMITATIONS.md` §11.
 
 The gate is what stops interpolation across pauses, loads, menus, replays,
 photo mode, occlusion, resolution changes, camera cuts and frame-time hitches,

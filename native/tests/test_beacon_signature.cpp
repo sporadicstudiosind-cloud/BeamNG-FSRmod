@@ -189,3 +189,105 @@ TEST(FormatPredicates, MatchExpectedSets) {
     CHECK(!isTypicalMotionVectorFormat(kR8G8B8A8Unorm));
     CHECK(!isTypicalMotionVectorFormat(kD32Float));
 }
+
+// ---------------------------------------------------------------------------
+// Paired beacons.
+//
+// FSR needs depth and motion vectors as two resources, so the mod half creates
+// two render targets of identical description and the bridge tells them apart
+// by creation order. Getting this backwards would feed depth in as motion
+// vectors, which produces a broken image rather than a visible failure — so it
+// is worth more tests than most of this file.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+BeaconSignature paired(uint32_t ordinal) {
+    BeaconSignature s = signature(1600, 900, kR32G32B32A32Float);
+    s.label = ordinal == 0 ? "fsrDepthBeacon" : "fsrMotionBeacon";
+    s.ordinal = ordinal;
+    s.expectedCount = 2;
+    return s;
+}
+
+} // namespace
+
+TEST(PairedBeacon, CreationOrderSelectsDepthThenMotion) {
+    const std::vector<ResourceDescriptor> res = {
+        tex(10, 1600, 900, kR32G32B32A32Float, 41), // created first  -> depth
+        tex(11, 1600, 900, kR32G32B32A32Float, 42), // created second -> motion
+        tex(12, 1920, 1080, kR32G32B32A32Float, 43), // wrong size
+    };
+
+    const auto depth = matchBeacon(paired(0), res);
+    const auto motion = matchBeacon(paired(1), res);
+    CHECK(depth.confidence == MatchConfidence::Exact);
+    CHECK(motion.confidence == MatchConfidence::Exact);
+    CHECK_EQ(depth.handle, uint64_t{10});
+    CHECK_EQ(motion.handle, uint64_t{11});
+}
+
+TEST(PairedBeacon, OrderIsByCreationSequenceNotByListOrder) {
+    // The registry is an unordered map, so a snapshot arrives in arbitrary
+    // order. Only creationSequence may decide identity.
+    const std::vector<ResourceDescriptor> res = {
+        tex(11, 1600, 900, kR32G32B32A32Float, 42),
+        tex(10, 1600, 900, kR32G32B32A32Float, 41),
+    };
+    CHECK_EQ(matchBeacon(paired(0), res).handle, uint64_t{10});
+    CHECK_EQ(matchBeacon(paired(1), res).handle, uint64_t{11});
+}
+
+TEST(PairedBeacon, FewerCandidatesThanExpectedMatchesNothing) {
+    // Only one of the pair is live — during the staged startup, or if one
+    // PostEffect failed to create. Choosing between depth and motion here would
+    // be a coin flip, so nothing is chosen.
+    const std::vector<ResourceDescriptor> res = {
+        tex(10, 1600, 900, kR32G32B32A32Float, 41),
+    };
+    const auto depth = matchBeacon(paired(0), res);
+    CHECK(depth.confidence == MatchConfidence::None);
+    CHECK_EQ(depth.handle, uint64_t{0});
+    CHECK_CONTAINS(depth.explanation, "expected 2");
+}
+
+TEST(PairedBeacon, StaleTargetsFromAPreviousResolutionPickTheNewestPair) {
+    // A resolution change back to a previous size leaves the old pair alive
+    // until the engine releases it. The newest group is the live one.
+    const std::vector<ResourceDescriptor> res = {
+        tex(1, 1600, 900, kR32G32B32A32Float, 10), // stale depth
+        tex(2, 1600, 900, kR32G32B32A32Float, 11), // stale motion
+        tex(3, 1600, 900, kR32G32B32A32Float, 90), // live depth
+        tex(4, 1600, 900, kR32G32B32A32Float, 91), // live motion
+    };
+    const auto depth = matchBeacon(paired(0), res);
+    const auto motion = matchBeacon(paired(1), res);
+    CHECK(depth.confidence == MatchConfidence::Ambiguous);
+    CHECK(motion.confidence == MatchConfidence::Ambiguous);
+    CHECK_EQ(depth.handle, uint64_t{3});
+    CHECK_EQ(motion.handle, uint64_t{4});
+}
+
+TEST(PairedBeacon, OrdinalOutOfRangeIsRejected) {
+    // A mod half newer than the bridge could describe a third beacon. Refusing
+    // is right: the bridge does not know what it would be.
+    BeaconSignature s = paired(0);
+    s.ordinal = 2;
+    const std::vector<ResourceDescriptor> res = {
+        tex(10, 1600, 900, kR32G32B32A32Float, 41),
+        tex(11, 1600, 900, kR32G32B32A32Float, 42),
+    };
+    const auto m = matchBeacon(s, res);
+    CHECK(m.confidence == MatchConfidence::None);
+    CHECK_CONTAINS(m.explanation, "out of range");
+}
+
+TEST(PairedBeacon, SingleBeaconSignaturesStillBehaveAsBefore) {
+    // expectedCount defaults to 1, so an unpaired signature is unaffected.
+    const std::vector<ResourceDescriptor> res = {
+        tex(7, 1600, 900, kR32G32B32A32Float, 5),
+    };
+    const auto m = matchBeacon(signature(1600, 900, kR32G32B32A32Float), res);
+    CHECK(m.confidence == MatchConfidence::Exact);
+    CHECK_EQ(m.handle, uint64_t{7});
+}

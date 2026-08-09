@@ -90,7 +90,7 @@ To be precise about the difference between "tested" and "unverified":
 | --- | --- |
 | FSR API usage is real and current | Compiled against AMD FSR SDK 2.3.0's actual headers with mingw-w64 |
 | The bridge links into three correctly-exported DLLs | `objdump -p` export tables match the system DLLs |
-| Capability rules match AMD's published requirements | 146 unit tests, including one per GPU class above |
+| Capability rules match AMD's published requirements | 153 unit tests, including one per GPU class above |
 | Planner never selects an unavailable feature | Unit tests over the full settings × capability matrix |
 | Settings survive save/load/corruption | Unit tests including malformed and truncated input |
 | Packaging produces both products | `tools/package.py` executed end to end |

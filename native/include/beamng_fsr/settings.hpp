@@ -44,6 +44,21 @@ struct RenderCalibration {
     bool motionVectorFlipY = true;
     bool motionVectorsAreUvSpace = true;
 
+    /// The Direct3D 12 resource state the beacon targets are in when BeamNG
+    /// presents.
+    ///
+    /// D3D12 provides no way to query a resource's current state, and BeamNG
+    /// does not document what state its PostFX system leaves a render target
+    /// in. FSR's backend transitions the resources it is given from the state
+    /// the caller declares, so declaring the wrong one produces incorrect
+    /// barriers. This is therefore an assumption with an override, exactly like
+    /// the depth convention and motion-vector encoding above, and it is
+    /// documented as unverified in docs/LIMITATIONS.md.
+    ///
+    /// One of: "pixelComputeRead" (default), "pixelRead", "computeRead",
+    /// "renderTarget", "genericRead", "common".
+    std::string beaconResourceState = "pixelComputeRead";
+
     [[nodiscard]] Json toJson() const;
     static RenderCalibration fromJson(const Json& j);
     void sanitise();

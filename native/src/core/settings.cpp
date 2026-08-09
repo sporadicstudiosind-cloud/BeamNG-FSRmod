@@ -144,6 +144,7 @@ Json RenderCalibration::toJson() const {
     j.set("motionVectorScaleY", Json(static_cast<double>(motionVectorScaleY)));
     j.set("motionVectorFlipY", Json(motionVectorFlipY));
     j.set("motionVectorsAreUvSpace", Json(motionVectorsAreUvSpace));
+    j.set("beaconResourceState", Json(beaconResourceState));
     return j;
 }
 
@@ -157,6 +158,7 @@ RenderCalibration RenderCalibration::fromJson(const Json& j) {
     c.motionVectorScaleY = readFloat(j, "motionVectorScaleY", c.motionVectorScaleY);
     c.motionVectorFlipY = readBool(j, "motionVectorFlipY", c.motionVectorFlipY);
     c.motionVectorsAreUvSpace = readBool(j, "motionVectorsAreUvSpace", c.motionVectorsAreUvSpace);
+    c.beaconResourceState = readString(j, "beaconResourceState", c.beaconResourceState);
     c.sanitise();
     return c;
 }
@@ -164,6 +166,14 @@ RenderCalibration RenderCalibration::fromJson(const Json& j) {
 void RenderCalibration::sanitise() {
     motionVectorScaleX = clampValue(motionVectorScaleX, -8192.0f, 8192.0f);
     motionVectorScaleY = clampValue(motionVectorScaleY, -8192.0f, 8192.0f);
+    // An unrecognised state would be silently coerced by the translation in
+    // bridge_runtime.cpp; rejecting it here instead means a typo in the config
+    // file surfaces as "reverted to the default" rather than as wrong barriers.
+    if (beaconResourceState != "pixelComputeRead" && beaconResourceState != "pixelRead" &&
+        beaconResourceState != "computeRead" && beaconResourceState != "renderTarget" &&
+        beaconResourceState != "genericRead" && beaconResourceState != "common") {
+        beaconResourceState = "pixelComputeRead";
+    }
 }
 
 bool RenderCalibration::operator==(const RenderCalibration& o) const {
@@ -171,7 +181,8 @@ bool RenderCalibration::operator==(const RenderCalibration& o) const {
            motionVectorScaleX == o.motionVectorScaleX &&
            motionVectorScaleY == o.motionVectorScaleY &&
            motionVectorFlipY == o.motionVectorFlipY &&
-           motionVectorsAreUvSpace == o.motionVectorsAreUvSpace;
+           motionVectorsAreUvSpace == o.motionVectorsAreUvSpace &&
+           beaconResourceState == o.beaconResourceState;
 }
 
 // ---------------------------------------------------------------------------

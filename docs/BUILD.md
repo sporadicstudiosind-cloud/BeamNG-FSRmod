@@ -31,7 +31,7 @@ cmake --build native/build
 ./native/build/bfsr_tests
 ```
 
-Expect `146 passed, 0 failed`. Filter with `./native/build/bfsr_tests Plan`.
+Expect `153 passed, 0 failed`. Filter with `./native/build/bfsr_tests Plan`.
 
 ## 3. Build the Windows bridge
 
@@ -121,7 +121,7 @@ native/
   src/pipeline/         the two planners, frame pacing, bridge runtime
   src/ipc/              protocol (portable) + one file channel per product
   src/proxy/            the two DLL stubs and their .def export lists
-  tests/                146 tests over everything portable
+  tests/                153 tests over everything portable
 mods/
   framegen/             frame generation mod ZIP source
   upscaling/            upscaling mod ZIP source

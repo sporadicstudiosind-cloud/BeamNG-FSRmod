@@ -38,6 +38,18 @@
     <p>{{status.common.initFailureReason}}</p>
   </div>
 
+  <!-- Stated first and unconditionally, because a panel that looks configurable
+       but never runs anything is worse than one that says so. -->
+  <div class="fsr-banner fsr-error"
+       ng-if="status.common.bridgeLoaded && !available('upscaling_ml') && !available('upscaling_analytical')">
+    <strong>Upscaling does not execute in this build.</strong>
+    <p>{{reason('upscaling_ml') || reason('upscaling_analytical')}}</p>
+    <p>The settings below are read, stored and planned against, and the
+       diagnostics are live — but no FSR upscale is dispatched. If you installed
+       this for a frame-rate gain, install the <em>AMD FSR Frame Generation</em>
+       product instead: that one runs.</p>
+  </div>
+
   <div class="fsr-banner fsr-warn" ng-if="status.safeModeActive">
     <strong>Safe mode is active.</strong>
     <p>The previous session did not shut down cleanly, so upscaling is off. Your
@@ -113,7 +125,7 @@
     <div class="fsr-live" ng-if="ready()">
       <div><span>Running</span><b>{{status.plan.versionName || status.plan.backend}}</b></div>
       <div><span>Resolution</span><b>{{resolutionText()}}</b></div>
-      <div><span>Rendered</span><b>{{metric(status.common.renderedFps, ' fps')}}</b></div>
+      <div><span>Rendered</span><b>{{metric(status.common.metrics.renderedFps, ' fps')}}</b></div>
     </div>
 
     <div class="fsr-banner fsr-info" ng-repeat="n in notes('downgrades')"><p>{{n}}</p></div>
@@ -141,10 +153,10 @@
         <tr><td>Depth source</td><td>{{status.common.depthSource}}</td></tr>
         <tr><td>Motion vectors</td><td>{{status.common.motionVectorSource}}</td></tr>
         <tr class="fsr-sep"><td colspan="2"></td></tr>
-        <tr><td>Rendered FPS</td><td>{{metric(status.common.renderedFps, ' fps')}}</td></tr>
-        <tr><td>1% low</td><td>{{metric(status.common.onePercentLowFps, ' fps')}}</td></tr>
-        <tr><td>0.1% low</td><td>{{metric(status.common.pointOnePercentLowFps, ' fps')}}</td></tr>
-        <tr><td>Frame time</td><td>{{metric(status.common.frameTimeMs, ' ms', 2)}}</td></tr>
+        <tr><td>Rendered FPS</td><td>{{metric(status.common.metrics.renderedFps, ' fps')}}</td></tr>
+        <tr><td>1% low</td><td>{{metric(status.common.metrics.onePercentLowFps, ' fps')}}</td></tr>
+        <tr><td>0.1% low</td><td>{{metric(status.common.metrics.pointOnePercentLowFps, ' fps')}}</td></tr>
+        <tr><td>Frame time</td><td>{{metric(status.common.metrics.frameTimeMs, ' ms', 2)}}</td></tr>
         <tr><td>GPU cost</td><td>{{metric(status.gpuMs, ' ms', 2)}}</td></tr>
         <tr><td>VRAM</td><td>{{megabytes(status.vramBytes)}}</td></tr>
       </table>
@@ -173,7 +185,7 @@
           </option>
         </select>
       </div>
-      <p class="fsr-note" ng-if="ready() && !versions().length">
+      <p class="fsr-note" ng-if="installed() && !versions().length">
         The installed AMD FSR runtime reports no upscaling provider for this GPU
         and driver.
       </p>
@@ -221,6 +233,25 @@
                ng-model="settings.calibration.motionVectorScaleY"
                ng-change="onSlider('calibration.motionVectorScaleY')">
       </div>
+
+      <div class="fsr-row">
+        <label>Beacon resource state</label>
+        <select ng-model="settings.calibration.beaconResourceState"
+                ng-change="onChange('calibration.beaconResourceState')">
+          <option value="pixelComputeRead">Pixel + compute read (default)</option>
+          <option value="pixelRead">Pixel read</option>
+          <option value="computeRead">Compute read</option>
+          <option value="renderTarget">Render target</option>
+          <option value="genericRead">Generic read</option>
+          <option value="common">Common</option>
+        </select>
+      </div>
+      <p class="fsr-note">
+        Direct3D 12 cannot be asked what state a texture is in, and BeamNG does
+        not document what its PostFX system leaves one in. FSR transitions the
+        beacon targets from whatever is declared here. If the image is wrong or
+        the log reports barrier errors, this is the setting to try.
+      </p>
 
       <h4>Debugging</h4>
       <div class="fsr-row">

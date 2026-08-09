@@ -228,3 +228,18 @@ TEST(SettingsStore, SaveIsAtomicAndLeavesNoTempFile) {
     CHECK(!tmp.good());
     std::remove(path.c_str());
 }
+
+TEST(Calibration, BeaconResourceStateRoundTripsAndRejectsNonsense) {
+    RenderCalibration c;
+    CHECK_STR_EQ(c.beaconResourceState, "pixelComputeRead");
+
+    c.beaconResourceState = "renderTarget";
+    const RenderCalibration out = RenderCalibration::fromJson(c.toJson());
+    CHECK_STR_EQ(out.beaconResourceState, "renderTarget");
+
+    // A typo must fall back to the default rather than reach the barrier code,
+    // where an unrecognised state would be coerced silently.
+    c.beaconResourceState = "rendertaget";
+    c.sanitise();
+    CHECK_STR_EQ(c.beaconResourceState, "pixelComputeRead");
+}

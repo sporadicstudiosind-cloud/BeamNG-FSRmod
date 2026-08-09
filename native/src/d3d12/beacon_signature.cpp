@@ -78,17 +78,53 @@ MatchResult matchBeacon(const BeaconSignature& sig,
         return result;
     }
 
-    const ResourceDescriptor* chosen = newest(candidates);
+    const uint32_t expected = sig.expectedCount == 0 ? 1u : sig.expectedCount;
+    if (sig.ordinal >= expected) {
+        result.explanation = "beacon '" + sig.label + "' declares ordinal " +
+                             std::to_string(sig.ordinal) + " of " + std::to_string(expected) +
+                             ", which is out of range; the mod half and the bridge are not "
+                             "the same version";
+        return result;
+    }
+
+    if (candidates.size() < expected) {
+        // Fewer targets are live than the mod says it created. Picking one
+        // would be a coin flip between depth and motion vectors, and feeding
+        // FSR the wrong one produces a broken image rather than a visible
+        // failure, so this reports nothing found.
+        result.explanation = "beacon '" + sig.label + "' expected " + std::to_string(expected) +
+                             " matching resources but found " +
+                             std::to_string(candidates.size()) +
+                             "; the beacon targets have not all been created yet";
+        return result;
+    }
+
+    // Order by creation, oldest first. The mod's PostEffect render priorities
+    // fix the order the engine allocates these targets in, so position within
+    // the newest group of `expected` is a reliable identity.
+    std::sort(candidates.begin(), candidates.end(),
+              [](const ResourceDescriptor* a, const ResourceDescriptor* b) {
+                  return a->creationSequence < b->creationSequence;
+              });
+    const size_t base = candidates.size() - expected;
+    const ResourceDescriptor* chosen = candidates[base + sig.ordinal];
     result.handle = chosen->handle;
-    if (candidates.size() == 1) {
+
+    if (candidates.size() == expected) {
         result.confidence = MatchConfidence::Exact;
-        result.explanation = "beacon '" + sig.label + "' matched a single resource";
+        result.explanation = "beacon '" + sig.label + "' matched resource " +
+                             std::to_string(sig.ordinal + 1) + " of " + std::to_string(expected);
     } else {
+        // More than the mod created: something else in the engine happens to
+        // share the description, or a previous resolution's targets are still
+        // alive. Taking the newest group is the right guess for the stale case,
+        // which is the common one, but it is a guess and is reported as such.
         result.confidence = MatchConfidence::Ambiguous;
         result.explanation = "beacon '" + sig.label + "' matched " +
-                             std::to_string(candidates.size()) +
-                             " resources; selected the most recently created one "
-                             "(stale targets from a previous resolution are the usual cause)";
+                             std::to_string(candidates.size()) + " resources but expected " +
+                             std::to_string(expected) +
+                             "; selected from the most recently created group (stale targets "
+                             "from a previous resolution are the usual cause)";
     }
     return result;
 }

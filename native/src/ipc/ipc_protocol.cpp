@@ -16,6 +16,8 @@ Json beaconToJson(const BeaconSignature& b) {
     j.set("expectRenderTarget", Json(b.expectRenderTarget));
     j.set("expectUnorderedAccess", Json(b.expectUnorderedAccess));
     j.set("label", Json(b.label));
+    j.set("ordinal", Json(static_cast<unsigned long long>(b.ordinal)));
+    j.set("expectedCount", Json(static_cast<unsigned long long>(b.expectedCount)));
     return j;
 }
 
@@ -28,6 +30,8 @@ BeaconSignature beaconFromJson(const Json& j) {
     b.expectRenderTarget = j["expectRenderTarget"].asBool(true);
     b.expectUnorderedAccess = j["expectUnorderedAccess"].asBool(false);
     b.label = j["label"].asString();
+    b.ordinal = static_cast<uint32_t>(j["ordinal"].asNumber(0));
+    b.expectedCount = static_cast<uint32_t>(j["expectedCount"].asNumber(1));
     return b;
 }
 
@@ -100,7 +104,8 @@ Json SharedFrameState::toJson() const {
     Json j = Json::object();
     j.set("gameState", std::move(state));
     j.set("camera", std::move(cam));
-    j.set("beacon", beaconToJson(beacon));
+    j.set("depthBeacon", beaconToJson(depthBeacon));
+    j.set("motionBeacon", beaconToJson(motionBeacon));
     return j;
 }
 
@@ -122,7 +127,8 @@ SharedFrameState SharedFrameState::fromJson(const Json& j) {
     s.cameraFar = static_cast<float>(cam["far"].asNumber(10000.0));
     s.cameraFovVerticalRadians = static_cast<float>(cam["fovVerticalRadians"].asNumber(1.2));
 
-    s.beacon = beaconFromJson(j["beacon"]);
+    s.depthBeacon = beaconFromJson(j["depthBeacon"]);
+    s.motionBeacon = beaconFromJson(j["motionBeacon"]);
     return s;
 }
 

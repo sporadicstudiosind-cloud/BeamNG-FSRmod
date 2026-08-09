@@ -66,8 +66,23 @@ struct BeaconSignature {
     uint32_t format = 0;
     bool expectRenderTarget = true;
     bool expectUnorderedAccess = false;
-    /// Human-readable label for logs, e.g. "fsrDepthMvBeacon".
+    /// Human-readable label for logs, e.g. "fsrDepthBeacon".
     std::string label;
+
+    /// FSR needs depth and motion vectors as *separate* resources: it reads
+    /// depth from channel 0 and the motion vector from channels 0 and 1, so a
+    /// single packed texture handed to both would feed it (depth, velocity.x)
+    /// as the motion vector. The mod half therefore publishes two render
+    /// targets of identical description, which makes them indistinguishable by
+    /// description alone.
+    ///
+    /// They are told apart by creation order instead, which is deterministic
+    /// here rather than incidental: both are created by PostEffects this mod
+    /// registers, and their `renderPriority` fixes the order in which the
+    /// engine allocates them. `ordinal` is the 0-based position in that order
+    /// and `expectedCount` is how many the mod creates in total.
+    uint32_t ordinal = 0;
+    uint32_t expectedCount = 1;
 };
 
 enum class MatchConfidence {

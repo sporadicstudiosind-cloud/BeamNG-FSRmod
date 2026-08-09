@@ -27,7 +27,7 @@ namespace bfsr {
 /// Wire format version. Each half refuses to act on a document from a different
 /// version rather than misinterpreting fields — a mismatched pair is what
 /// happens when a user updates one product and not the other.
-constexpr int kIpcProtocolVersion = 2;
+constexpr int kIpcProtocolVersion = 3;
 
 bool isProtocolCompatible(int otherVersion) noexcept;
 
@@ -47,8 +47,15 @@ struct SharedFrameState {
     float cameraFar = 10000.0f;
     float cameraFovVerticalRadians = 1.2f;
 
-    /// Description of the render target the shared PostFX beacon writes into.
-    BeaconSignature beacon;
+    /// Descriptions of the two render targets the shared PostFX beacon writes.
+    ///
+    /// Two, not one: FSR reads depth from channel 0 and the motion vector from
+    /// channels 0 and 1, so one packed texture passed as both inputs would be
+    /// read as a motion vector of (depth, velocity.x). They are separate
+    /// targets of identical description, told apart by creation order — see
+    /// `BeaconSignature::ordinal`.
+    BeaconSignature depthBeacon;
+    BeaconSignature motionBeacon;
 
     [[nodiscard]] Json toJson() const;
     static SharedFrameState fromJson(const Json& j);

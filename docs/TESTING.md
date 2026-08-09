@@ -14,7 +14,7 @@ cmake -S native -B native/build -DBFSR_BUILD_BRIDGE=OFF
 cmake --build native/build && ./native/build/bfsr_tests
 ```
 
-146 tests over every module that can be tested without a graphics device.
+153 tests over every module that can be tested without a graphics device.
 
 | Suite | Tests | Covers |
 | --- | --- | --- |

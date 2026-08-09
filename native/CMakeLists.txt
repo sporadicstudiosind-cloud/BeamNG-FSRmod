@@ -72,6 +72,8 @@ if(BFSR_BUILD_BRIDGE)
         src/d3d12/resource_registry.cpp
         src/d3d12/device_proxy.cpp
         src/d3d12/factory_proxy.cpp
+        src/d3d12/swapchain_proxy.cpp
+        src/d3d12/frame_command_ring.cpp
         src/caps/capability_detector_d3d12.cpp
         src/ffx/ffx_loader.cpp
         src/ffx/fsr_upscaler.cpp

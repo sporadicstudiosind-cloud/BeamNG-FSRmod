@@ -2,10 +2,19 @@
 
 Two independent products for BeamNG.drive's Direct3D 12 renderer:
 
-| Product | What it adds | Install |
-| --- | --- | --- |
-| **AMD FSR Frame Generation** | ML frame generation on RDNA 4, analytical frame generation elsewhere, plus AMD Radeon Anti-Lag 2 | `dist/framegen/` |
-| **AMD FSR Upscaling** | ML upscaling on RX 9000 / RX 7000, analytical FSR 3.1.x elsewhere | `dist/upscaling/` |
+| Product | What it adds | Status | Install |
+| --- | --- | --- | --- |
+| **AMD FSR Frame Generation** | ML frame generation on RDNA 4, analytical frame generation elsewhere, plus AMD Radeon Anti-Lag 2 | Complete end to end, **untested on hardware** | `dist/framegen/` |
+| **AMD FSR Upscaling** | ML upscaling on RX 9000 / RX 7000, analytical FSR 3.1.x elsewhere | **Does not execute yet** — see below | `dist/upscaling/` |
+
+> **If you want a frame-rate gain today, install the frame generation product.**
+> The upscaling product is fully built — context, dispatch, planner, settings,
+> UI — but nothing dispatches it, because presenting more pixels than BeamNG
+> rendered needs a backbuffer-substitution layer this build does not have. The
+> bridge says so at startup and the panel leads with it, rather than looking
+> configurable while doing nothing. Details in
+> [`LIMITATIONS.md` §11](docs/LIMITATIONS.md); the design for closing it is
+> [`FUTURE_WORK.md` §0](docs/FUTURE_WORK.md).
 
 **Each works completely on its own.** Neither requires the other, neither knows
 whether the other is installed, and installing both is supported — they ship the
@@ -37,8 +46,8 @@ the audit table below, stated precisely. Everything else is marked NOT TESTED.
 
 | | Assessment |
 | --- | --- |
-| **FSR Frame Generation** | The strongest feature. Frame generation does not need camera jitter, and everything it does need can be obtained. This is what to use. |
-| **FSR Upscaling** | Runs, but **without camera jitter**, because BeamNG exposes no hook for it. Materially softer than a native FSR integration. Structural, unfixable from the mod side, and stated in the UI every time you enable it. |
+| **FSR Frame Generation** | The strongest feature and the one that is complete. Frame generation does not need camera jitter, and everything it does need can be obtained. A Present hook drives it every frame; AMD's interpolation swapchain presents the result. This is what to use. |
+| **FSR Upscaling** | **Does not execute in this build.** Needs backbuffer substitution, which is not implemented (`LIMITATIONS.md` §11). It would also run **without camera jitter**, because BeamNG exposes no hook for it — materially softer than a native FSR integration, structural, and unfixable from the mod side. |
 | **Vulkan / D3D11** | Impossible. AMD ships no Vulkan FSR backend and FSR 3.1+ requires D3D12. The mod detects the renderer and disables itself with an explanation. |
 | **AMD's driver-side FSR 4 upgrade** | BeamNG cannot qualify. AMD explicitly excludes third-party integrations. |
 
@@ -111,7 +120,7 @@ Full detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 ```bash
 python3 tools/fetch_fsr_sdk.py --dest third_party/FidelityFX-SDK
 cmake -S native -B native/build -DBFSR_BUILD_BRIDGE=OFF
-cmake --build native/build && ./native/build/bfsr_tests    # 146 tests
+cmake --build native/build && ./native/build/bfsr_tests    # 153 tests
 ```
 
 Windows bridge and packaging: [`docs/BUILD.md`](docs/BUILD.md).
@@ -144,8 +153,11 @@ a command was run and its output checked, not that the code looks right.
 | FSR API usage is real and current | ✅ | ✅ compiles against AMD FSR SDK 2.3.0's actual headers | — | No API invented; SDK cloned and read |
 | DXGI proxy (`dxgi.dll`) | ✅ | ✅ builds; export table matches system DLL | Windows x64 | Full `IDXGIFactory..7` chain wrapped |
 | D3D12 proxy (`d3d12.dll`) | ✅ | ✅ builds; export table matches system DLL | Windows x64 | Base `ID3D12Device` only — see LIMITATIONS §4 |
-| FSR upscaling integration | ✅ | ⚠️ compile-verified only | DX12; SM 6.2 / 6.6 | **Runs without camera jitter** — LIMITATIONS §1 |
-| FSR frame generation | ✅ | ⚠️ compile-verified only | DX12; ML needs RX 9000 + Win 11 | Wraps AMD's interpolation swapchain |
+| **Per-frame execution path** | ✅ frame generation only | ⚠️ compile-verified only | DX12 | `IDXGISwapChain4` proxy; Present is the tick. Drives IPC, planning, beacon resolution and dispatch |
+| FSR frame generation | ✅ | ⚠️ compile-verified only | DX12; ML needs RX 9000 + Win 11 | Wraps AMD's interpolation swapchain, prepares and configures every frame |
+| FSR upscaling integration | ⚠️ **does not execute** | ✅ the gap is asserted at runtime | DX12; SM 6.2 / 6.6 | Context, dispatch and planner are real and unused: there is no backbuffer substitution to give them an input and an output. LIMITATIONS §11 |
+| Backbuffer substitution (what upscaling needs) | ❌ not implemented | — | — | The one piece missing for product 2. FUTURE_WORK.md |
+| Command recording for FSR's own work | ✅ | ✅ ring logic reviewed; allocator reuse is fence-gated | DX12 | Three-slot allocator/list/fence ring on the game's queue |
 | Runtime version discovery + selection | ✅ | ⚠️ compile-verified only | — | AMD's `ffxQuery` / `ffxOverrideVersion`; nothing hardcoded |
 | GPU / API / OS / SM detection | ✅ | ✅ policy layer unit-tested | — | Adapter matched by LUID, not index |
 | Capability model | ✅ | ✅ 15 unit tests, one per GPU class | — | Encodes AMD's published requirements |
@@ -156,7 +168,7 @@ a command was run and its output checked, not that the code looks right.
 | Settings persistence | ✅ | ✅ unit-tested incl. corrupt input | — | Atomic write; survives reload and renderer restart |
 | Settings + diagnostics UI | ✅ | ✅ JS/JSON/HTML parse-checked | — | Not rendered in a real BeamNG UI |
 | BeamNG Lua half | ✅ | ✅ LuaJIT syntax-checked | — | Not executed in a real BeamNG VM |
-| PostFX beacon | ✅ | ⚠️ authored against documented API | Needs Lighting Quality ≥ Low | Target names from BeamNG's docs; not run |
+| PostFX beacon (two targets) | ✅ | ✅ 6 pairing tests + syntax-checked Lua | Needs Lighting Quality ≥ Low | Depth and motion vectors must be *separate* FSR resources; identity is by creation order, staged one frame apart so the order is established rather than assumed |
 | Failsafe / safe mode | ✅ | ✅ logic unit-tested | — | Crash sentinel; every entry point catches |
 | Frame-gen gating and pacing | ✅ | ✅ 13 unit tests | — | Pause, load, menu, replay, photo, occlusion, hitch, cuts |
 | Diagnostics + benchmark export | ✅ | ✅ 11 unit tests | — | Rendered vs displayed FPS never merged |
@@ -170,18 +182,30 @@ a command was run and its output checked, not that the code looks right.
 | **Per-GPU compatibility** | ❌ | ❌ **no hardware** | — | Every row NOT TESTED |
 | Depth convention | ⚠️ assumed | ❌ **unverified** | — | Reversed-Z assumed, UI override, debug view to confirm |
 | Motion-vector encoding | ⚠️ assumed | ❌ **unverified** | — | UV space + Y flip assumed, UI override, debug view to confirm |
+| Beacon resource state | ⚠️ assumed | ❌ **unverified** | — | D3D12 cannot be asked; pixel+compute read assumed, UI override. LIMITATIONS §5 |
 
 ### The honest summary
 
-The architecture is sound and sourced. The native bridge compiles against AMD's
-real API and produces correctly-exported DLLs. The decision logic — the part
-where a mistake means promising a user something their hardware cannot do — is
-covered by 146 tests that run without a GPU.
+**Frame generation is complete end to end and upscaling is not.** That is the
+single most important line in this table.
 
-What is missing is everything that needs a Windows machine with a GPU and a
-BeamNG install: whether it runs, how fast, how it looks, and whether the two
-undocumented BeamNG encodings were guessed correctly. Those are marked as
-missing rather than filled in with plausible numbers.
+Frame generation has every piece: AMD's interpolation swapchain is installed
+when BeamNG creates its own, a Present hook drives the frame, settings arrive
+from the UI, the beacon targets are located, and the prepare dispatch is
+recorded and submitted. Upscaling has a real FSR context and a real dispatch
+that nothing calls, because presenting more pixels than BeamNG rendered needs a
+backbuffer-substitution layer this build does not have. The bridge asserts that
+gap at startup and the panel leads with it, so the product cannot appear to be
+working when it is not.
+
+The decision logic — the part where a mistake means promising a user something
+their hardware cannot do — is covered by 153 tests that run without a GPU.
+
+What is still missing is everything that needs a Windows machine with a GPU and
+a BeamNG install: whether it runs, how fast, how it looks, and whether the three
+undocumented BeamNG behaviours (depth convention, motion-vector encoding, beacon
+resource state) were guessed correctly. Those are marked as missing rather than
+filled in with plausible numbers.
 
 ## Licence
 

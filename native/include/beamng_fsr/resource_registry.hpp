@@ -33,6 +33,15 @@ public:
 
     [[nodiscard]] size_t size() const;
 
+    /// Bumped whenever a texture is recorded or forgotten.
+    ///
+    /// The per-frame driver caches the resources it resolved from a beacon
+    /// signature, and a cached ID3D12Resource* is only safe to reuse while no
+    /// resource has been destroyed since. Comparing this counter is how the
+    /// driver knows the cache is still describing live objects without copying
+    /// and re-matching the whole registry on every present.
+    [[nodiscard]] uint64_t generation() const;
+
     /// Converts a D3D12 description into the portable form the matcher uses.
     static ResourceDescriptor describe(ID3D12Resource* resource,
                                        const D3D12_RESOURCE_DESC& desc,
@@ -42,6 +51,7 @@ private:
     mutable std::mutex mutex_;
     std::unordered_map<ID3D12Resource*, ResourceDescriptor> textures_;
     uint64_t sequence_ = 0;
+    uint64_t generation_ = 0;
 };
 
 /// Watches a resource for destruction so the registry can drop its entry.

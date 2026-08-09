@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.PROTOCOL_VERSION = 2
+M.PROTOCOL_VERSION = 3
 M.VERSION = '0.2.0'
 
 -- The bridge writes its files beside its own DLL, in the BeamNG install
@@ -109,10 +109,14 @@ end
 --- The block both products send. Identical content on purpose: it is what lets
 --- either run without the other's mod half being installed.
 function M.sharedFrameState(beacon)
+  -- Two signatures, not one: FSR needs depth and motion vectors as separate
+  -- resources, so the beacon publishes two targets. See beacon.lua.
+  local signatures = beacon and beacon:describe() or nil
   return {
     gameState = readGameState(),
     camera = readCamera(),
-    beacon = beacon and beacon:describe() or { valid = false },
+    depthBeacon = signatures and signatures.depth or { valid = false },
+    motionBeacon = signatures and signatures.motion or { valid = false },
   }
 end
 
@@ -149,6 +153,12 @@ end
 
 function M.refreshBeacon()
   if beaconModule then beaconModule:refresh() end
+end
+
+--- Drives the beacon's staged enable. Both products call this every frame; it
+--- is idempotent, so whichever of them is installed keeps the beacon advancing.
+function M.tickBeacon()
+  if beaconModule then beaconModule:tick() end
 end
 
 -- ---------------------------------------------------------------------------

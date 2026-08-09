@@ -22,6 +22,7 @@
 #include "beamng_fsr/factory_proxy.hpp"
 #include "beamng_fsr/ffx_loader.hpp"
 #include "beamng_fsr/file_ipc.hpp"
+#include "beamng_fsr/frame_command_ring.hpp"
 #include "beamng_fsr/frame_pacing.hpp"
 #include "beamng_fsr/fsr_framegen.hpp"
 #include "beamng_fsr/fsr_upscaler.hpp"
@@ -30,6 +31,7 @@
 #include "beamng_fsr/paths.hpp"
 #include "beamng_fsr/plan.hpp"
 #include "beamng_fsr/resource_registry.hpp"
+#include "beamng_fsr/swapchain_proxy.hpp"
 
 #include <dxgi1_6.h>
 
@@ -37,6 +39,7 @@
 #include <ffx_framegeneration.h>
 #include <ffx_upscale.h>
 
+#include <chrono>
 #include <memory>
 #include <mutex>
 
@@ -162,8 +165,15 @@ public:
         if (!initialised_) return;
         BFSR_LOG_INFO("BeamNG FSR Bridge shutting down");
 
-        // Order matters: interpolation must stop before the swapchain that
-        // drives it is released, and both before the runtime unloads.
+        // Order matters, and this is the order.
+        //
+        // The game may still present while the process tears down, so the hooks
+        // come off first — after that a Present is a plain forward and cannot
+        // reach anything being destroyed. Then the GPU is drained, because the
+        // command ring's submissions reference FSR's resources. Only then may
+        // interpolation stop, the swapchain be released, and the runtime unload.
+        if (swapChainProxy_) swapChainProxy_->detachHooks();
+        ring_.destroy();
         if (frameGen_) {
             frameGen_->generator.destroyContext();
             frameGen_->generator.unwrapSwapChain();
@@ -171,6 +181,18 @@ public:
         }
         if (upscale_) upscale_->upscaler.destroy();
         ffx_.unload();
+
+        // The references taken when the swapchain was wrapped. The game may
+        // still hold its own on the proxy, which is why this is a release and
+        // not a delete.
+        if (swapChainProxy_) {
+            swapChainProxy_->Release();
+            swapChainProxy_ = nullptr;
+        }
+        if (gameQueue_) {
+            gameQueue_->Release();
+            gameQueue_ = nullptr;
+        }
 
         removeSentinel(paths_.crashSentinelFile);
         Logger::instance().shutdown();
@@ -244,6 +266,16 @@ public:
         // Buffers the frame-generation context holds refer to the swapchain's
         // old surfaces. Tear down now; the next frame rebuilds against the new
         // size via the planner.
+        //
+        // The command ring is drained first because its in-flight submissions
+        // reference those same resources, and the beacon cache is dropped
+        // because the engine will re-create its render targets at the new size.
+        ring_.waitForIdle();
+        beaconCacheValid_ = false;
+        depthResource_ = nullptr;
+        motionResource_ = nullptr;
+        displaySize_ = {};
+
         if (frameGen_ && frameGen_->generator.hasContext()) {
             BFSR_LOG_INFO("swapchain resize: releasing frame generation for rebuild");
             frameGen_->generator.destroyContext();
@@ -279,6 +311,10 @@ private:
     IUnknown* handleSwapChainCreated(IUnknown* swapChain, IUnknown* deviceOrQueue) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!swapChain || !frameGen_) return nullptr;
+        if (swapChainProxy_) {
+            BFSR_LOG_DEBUG("a second swapchain was created; only the first is driven");
+            return nullptr;
+        }
 
         // For D3D12 the "device" argument to CreateSwapChainForHwnd is actually
         // the command queue, which is exactly what AMD's wrap descriptor wants.
@@ -292,9 +328,441 @@ private:
                           "generation is unavailable for it");
             return nullptr;
         }
+
+        // AMD's wrap descriptor and this bridge's own proxy both need
+        // IDXGISwapChain4.
+        IDXGISwapChain4* chain4 = nullptr;
+        if (FAILED(swapChain->QueryInterface(__uuidof(IDXGISwapChain4),
+                                             reinterpret_cast<void**>(&chain4))) ||
+            !chain4) {
+            queue->Release();
+            BFSR_LOG_INFO("the swapchain does not expose IDXGISwapChain4; frame generation "
+                          "cannot attach to it");
+            return nullptr;
+        }
+
         gameQueue_ = queue; // reference retained for the swapchain's lifetime
-        gameSwapChain_ = swapChain;
-        return nullptr;     // wrapping happens lazily, once a plan asks for it
+
+        // Composition order matters. AMD's frame-interpolation swapchain
+        // replaces the DXGI one and schedules the generated frame; this
+        // bridge's proxy then wraps *that*, so the per-frame hook runs before
+        // AMD's swapchain sees the Present. Wrapping the other way round would
+        // prepare a frame that had already been presented.
+        if (ffx_.isLoaded() && capabilities_.anyFrameGeneration()) {
+            const Result wrapped = frameGen_->generator.wrapSwapChain(ffx_, &chain4, gameQueue_);
+            if (!wrapped) {
+                Logger::instance().failureBlock(
+                    "frame-generation swapchain", wrapped.reason(),
+                    "AMD's frame-interpolation swapchain", "could not be created",
+                    "frame generation stays off; BeamNG presents normally");
+                frameGenSwapChainFailure_ = wrapped.reason();
+            }
+        } else {
+            frameGenSwapChainFailure_ =
+                ffx_.isLoaded()
+                    ? std::string("This GPU, driver and API combination supports no FSR "
+                                  "frame-generation provider.")
+                    : std::string("The AMD FSR runtime is not loaded, so no frame-generation "
+                                  "swapchain could be created.");
+        }
+
+        // The proxy is installed even when AMD's swapchain could not be
+        // created. It costs one forwarded call per Present and it is what keeps
+        // the frame timer, the IPC poll and the status document live, so the
+        // panel can report *why* frame generation is off instead of going
+        // silent.
+        swapChainProxy_ = new SwapChainProxy(chain4, &BridgeRuntime::onPresentThunk,
+                                             &BridgeRuntime::onResizeThunk, this);
+        chain4->Release(); // the proxy took its own reference
+
+        // Two reference-count details, both of which are bugs if omitted.
+        //
+        // First: the factory proxy hands the game this object *in place of* the
+        // one DXGI created, so the reference the game was going to hold on that
+        // original is now held by nobody. Releasing it here is what stops the
+        // real swapchain outliving the process.
+        swapChain->Release();
+
+        // Second: the proxy is constructed with the single reference the game
+        // takes, and this raw pointer would dangle the moment the game released
+        // it — while shutdown() still expects to call detachHooks() on it. So
+        // the runtime takes a reference of its own, released in shutdown().
+        swapChainProxy_->AddRef();
+
+        BFSR_LOG_INFO("per-frame driver attached to the swapchain");
+        publishStatus();
+        return static_cast<IDXGISwapChain4*>(swapChainProxy_);
+    }
+
+    // -----------------------------------------------------------------------
+    // The per-frame driver.
+    //
+    // Everything above this line runs once. This is the part that runs every
+    // frame, and it is what turns a set of configured FSR objects into a
+    // working integration: without it nothing resolves a plan, creates a
+    // context, locates the beacon or dispatches anything.
+    // -----------------------------------------------------------------------
+
+    static void onPresentThunk(IDXGISwapChain4* swapChain, UINT syncInterval, UINT flags,
+                               void* ctx) {
+        auto* self = static_cast<BridgeRuntime*>(ctx);
+        if (!self) return;
+        try {
+            self->onPresent(swapChain, syncInterval, flags);
+        } catch (...) {
+            // A throw here would cross into BeamNG's render loop. Losing a
+            // frame of FSR is always preferable.
+        }
+    }
+
+    static void onResizeThunk(IDXGISwapChain4* swapChain, void* ctx) {
+        auto* self = static_cast<BridgeRuntime*>(ctx);
+        if (!self) return;
+        try {
+            self->onSwapChainResize(swapChain);
+        } catch (...) {
+        }
+    }
+
+    void onPresent(IDXGISwapChain4* swapChain, UINT syncInterval, UINT flags) {
+        (void)syncInterval;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!initialised_ || !swapChain) return;
+
+        // A test present is how an application probes an occluded window. It
+        // presents nothing, so there is no frame to work on — and it is the
+        // one occlusion signal available before Present returns.
+        if ((flags & DXGI_PRESENT_TEST) != 0) {
+            windowOccluded_ = true;
+            return;
+        }
+        windowOccluded_ = false;
+
+        const auto now = std::chrono::steady_clock::now();
+        float frameTimeMs = 0.0f;
+        if (haveLastPresent_) {
+            frameTimeMs = std::chrono::duration<float, std::milli>(now - lastPresent_).count();
+            if (frameTimeMs > 0.0f) renderedFrameTimes_.addFrame(frameTimeMs);
+        }
+        lastPresent_ = now;
+        haveLastPresent_ = true;
+        ++framesRendered_;
+        ++frameId_;
+
+        // File I/O on the render thread is paced rather than per-frame: nothing
+        // in the request document changes faster than a user can click, and the
+        // cost of a stat() every frame is not worth paying for that.
+        if (now - lastRequestPoll_ >= std::chrono::milliseconds(150)) {
+            lastRequestPoll_ = now;
+            pollRequests();
+        }
+
+        if (frameGen_) driveFrameGeneration(swapChain, frameTimeMs);
+
+        if (now - lastStatusPublish_ >= std::chrono::milliseconds(400)) {
+            lastStatusPublish_ = now;
+            displayedFps_ = computeDisplayedFps();
+            publishStatus();
+        }
+    }
+
+    /// Reads whatever each installed product's mod half last wrote.
+    void pollRequests() {
+        if (frameGen_ && frameGen_->ipc) {
+            FrameGenRequest request;
+            std::string diagnostic;
+            if (frameGen_->ipc->readRequest(request, &diagnostic)) {
+                applyFrameGenRequest(request);
+            } else if (!diagnostic.empty() && diagnostic != lastFrameGenIpcDiagnostic_) {
+                lastFrameGenIpcDiagnostic_ = diagnostic;
+                BFSR_LOG_WARN("frame generation request: %s", diagnostic.c_str());
+            }
+        }
+
+        if (upscale_ && upscale_->ipc) {
+            UpscaleRequest request;
+            std::string diagnostic;
+            if (upscale_->ipc->readRequest(request, &diagnostic)) {
+                applyUpscaleRequest(request);
+            } else if (!diagnostic.empty() && diagnostic != lastUpscaleIpcDiagnostic_) {
+                lastUpscaleIpcDiagnostic_ = diagnostic;
+                BFSR_LOG_WARN("upscaling request: %s", diagnostic.c_str());
+            }
+        }
+    }
+
+    void applyFrameGenRequest(const FrameGenRequest& request) {
+        shared_ = request.shared;
+        haveSharedState_ = true;
+
+        FrameGenSettings incoming = request.settings;
+        // Safe mode is the bridge's state, not the mod's: the mod half has no
+        // way to know the previous session crashed. It survives a settings
+        // push and is cleared only by the explicit request below.
+        incoming.safeMode = frameGen_->settings.safeMode;
+        if (request.clearSafeMode && incoming.safeMode) {
+            incoming.safeMode = false;
+            BFSR_LOG_INFO("safe mode cleared for frame generation at the user's request");
+        }
+        incoming.sanitise();
+
+        if (incoming != frameGen_->settings) {
+            frameGen_->settings = incoming;
+            frameGen_->store->save(frameGen_->settings);
+            applyLogLevel();
+            BFSR_LOG_INFO("frame generation settings updated from the mod half");
+        }
+    }
+
+    void applyUpscaleRequest(const UpscaleRequest& request) {
+        shared_ = request.shared;
+        haveSharedState_ = true;
+
+        UpscaleSettings incoming = request.settings;
+        incoming.safeMode = upscale_->settings.safeMode;
+        if (request.clearSafeMode && incoming.safeMode) {
+            incoming.safeMode = false;
+            BFSR_LOG_INFO("safe mode cleared for upscaling at the user's request");
+        }
+        incoming.sanitise();
+
+        if (incoming != upscale_->settings) {
+            upscale_->settings = incoming;
+            upscale_->store->save(upscale_->settings);
+            applyLogLevel();
+            BFSR_LOG_INFO("upscaling settings updated from the mod half");
+        }
+    }
+
+    /// Resolves the two beacon render targets, caching while the registry is
+    /// unchanged.
+    ///
+    /// Caching is not an optimisation here so much as a correctness boundary: a
+    /// cached ID3D12Resource* is only safe while nothing has been destroyed,
+    /// and the registry's generation counter is exactly that condition.
+    void resolveBeacons() {
+        if (!haveSharedState_) {
+            depthSource_ = "the BeamNG mod half has not reported in yet";
+            motionVectorSource_ = depthSource_;
+            depthResource_ = nullptr;
+            motionResource_ = nullptr;
+            return;
+        }
+
+        const uint64_t generation = registry_.generation();
+        if (beaconCacheValid_ && generation == beaconCacheGeneration_ &&
+            shared_.depthBeacon.width == cachedWidth_ &&
+            shared_.depthBeacon.height == cachedHeight_ &&
+            shared_.depthBeacon.valid == cachedSignatureValid_) {
+            return;
+        }
+        beaconCacheGeneration_ = generation;
+        cachedWidth_ = shared_.depthBeacon.width;
+        cachedHeight_ = shared_.depthBeacon.height;
+        cachedSignatureValid_ = shared_.depthBeacon.valid;
+        beaconCacheValid_ = true;
+
+        const auto resources = registry_.snapshot();
+        const MatchResult depth = matchBeacon(shared_.depthBeacon, resources);
+        const MatchResult motion = matchBeacon(shared_.motionBeacon, resources);
+
+        // Ambiguous is accepted with the reason recorded; None is not. The
+        // difference matters: an ambiguous match picked the newest of several
+        // identically-described targets, which is nearly always the live one
+        // after a resolution change, while no match at all means the bridge
+        // does not know where the data is.
+        depthResource_ = depth.confidence == MatchConfidence::None
+                             ? nullptr
+                             : reinterpret_cast<ID3D12Resource*>(depth.handle);
+        motionResource_ = motion.confidence == MatchConfidence::None
+                              ? nullptr
+                              : reinterpret_cast<ID3D12Resource*>(motion.handle);
+
+        depthSource_ = std::string(toString(depth.confidence)) + ": " + depth.explanation;
+        motionVectorSource_ = std::string(toString(motion.confidence)) + ": " + motion.explanation;
+
+        if (depthSource_ != lastLoggedDepthSource_) {
+            lastLoggedDepthSource_ = depthSource_;
+            BFSR_LOG_INFO("depth beacon: %s", depthSource_.c_str());
+            BFSR_LOG_INFO("motion beacon: %s", motionVectorSource_.c_str());
+        }
+    }
+
+    RuntimeContext buildRuntimeContext(Extent2D displaySize) {
+        RuntimeContext ctx;
+        ctx.displaySize = displaySize;
+        // The bridge cannot make BeamNG render its scene at a resolution other
+        // than the one it presents at (docs/LIMITATIONS.md §2), so these are
+        // the same number. It stays a separate field because the planners are
+        // written for the day that changes.
+        ctx.sceneRenderSize = displaySize;
+        ctx.availableVramBytes = gpu_.dedicatedVideoMemory;
+        ctx.depthAvailable = depthResource_ != nullptr;
+        ctx.motionVectorsAvailable = motionResource_ != nullptr;
+        ctx.frameInputsAvailable = ctx.depthAvailable && ctx.motionVectorsAvailable;
+        ctx.cameraJitterAvailable = false; // BeamNG exposes no jitter hook
+        ctx.measuredBaseFps = renderedFrameTimes_.averageFps();
+        if (frameGen_) {
+            ctx.frameGenVersions = frameGen_->versions;
+            ctx.estimatedFrameGenVramBytes = frameGen_->vramBytes;
+        }
+        if (upscale_) {
+            ctx.upscalerVersions = upscale_->versions;
+            ctx.estimatedUpscalerVramBytes = upscale_->vramBytes;
+        }
+        return ctx;
+    }
+
+    void driveFrameGeneration(IDXGISwapChain4* swapChain, float frameTimeMs) {
+        FrameGenModule& fg = *frameGen_;
+
+        DXGI_SWAP_CHAIN_DESC1 desc{};
+        if (FAILED(swapChain->GetDesc1(&desc)) || desc.Width == 0 || desc.Height == 0) return;
+        const Extent2D display{desc.Width, desc.Height};
+
+        const bool resolutionChanged = displaySize_.valid() && displaySize_ != display;
+        displaySize_ = display;
+
+        resolveBeacons();
+        const RuntimeContext ctx = buildRuntimeContext(display);
+        fg.plan = resolveFrameGenPlan(fg.settings, capabilities_, ctx);
+
+        if (!fg.plan.active()) {
+            if (fg.generator.hasContext()) {
+                BFSR_LOG_INFO("frame generation is no longer planned; releasing its context");
+                fg.generator.destroyContext();
+                ring_.destroy();
+                fg.gate.reset();
+            }
+            return;
+        }
+
+        if (!fg.generator.hasWrappedSwapChain()) {
+            // Planned but unreachable: AMD's interpolation swapchain is what
+            // actually presents generated frames, and it is created once, when
+            // the game creates its swapchain. There is no way to attach later.
+            if (!reportedNoSwapChain_) {
+                reportedNoSwapChain_ = true;
+                BFSR_LOG_WARN("frame generation is enabled but no frame-generation swapchain "
+                              "was created: %s",
+                              frameGenSwapChainFailure_.empty() ? "reason not recorded"
+                                                                : frameGenSwapChainFailure_.c_str());
+            }
+            return;
+        }
+
+        if (fg.generator.needsRecreate(fg.plan, fg.settings, desc.Format)) {
+            const Result created =
+                fg.generator.createContext(ffx_, realDevice_, fg.plan, fg.settings, desc.Format);
+            if (!created) {
+                Logger::instance().failureBlock("frame-generation context", created.reason(),
+                                                "the FSR frame-generation context",
+                                                "could not be created",
+                                                "frame generation disabled for this session");
+                fg.settings.enabled = false;
+                fg.store->save(fg.settings);
+                return;
+            }
+            fg.gate.reset();
+
+            if (!ring_.isValid()) {
+                const Result ring = ring_.create(realDevice_, gameQueue_);
+                if (!ring) {
+                    BFSR_LOG_WARN("could not create FSR's command ring: %s",
+                                  ring.reason().c_str());
+                }
+            }
+
+            uint64_t bytes = 0;
+            if (FsrFrameGenerator::queryMemoryUsage(ffx_, realDevice_, display, display,
+                                                    fg.generator.createFlags(),
+                                                    0, desc.Format, bytes)) {
+                fg.vramBytes = bytes;
+            }
+        }
+
+        FrameGenGateInput gate;
+        gate.paused = shared_.paused;
+        gate.loading = shared_.loading;
+        gate.uiFocused = shared_.uiFocused;
+        gate.photoMode = shared_.photoMode;
+        gate.replay = shared_.replay;
+        gate.cameraCutThisFrame = shared_.cameraCut;
+        gate.windowOccluded = windowOccluded_;
+        gate.deviceLost = realDevice_ && realDevice_->GetDeviceRemovedReason() != S_OK;
+        gate.inputsAvailable = ctx.frameInputsAvailable && ring_.isValid();
+        gate.enabledByPlan = true;
+        gate.resolutionChangedThisFrame = resolutionChanged;
+        gate.frameTimeMs = frameTimeMs > 0.0f ? frameTimeMs : 16.6f;
+        const auto decision = fg.gate.evaluate(gate);
+
+        // Anti-Lag is told about the frame regardless of whether this one is
+        // interpolated: the driver paces against a continuous stream, and
+        // reporting only some frames would describe a game running at half the
+        // rate it is.
+        if (fg.plan.antiLag2) {
+            if (!fg.antiLag.isActive()) fg.antiLag.initialise(realDevice_);
+            fg.antiLag.update(true, fg.plan.antiLagMaxFps);
+        } else if (fg.antiLag.isActive()) {
+            fg.antiLag.update(false, 0);
+        }
+
+        bool prepared = false;
+        if (decision.allowInterpolation && depthResource_ && motionResource_ && ring_.isValid()) {
+            if (auto* commandList = ring_.begin()) {
+                FrameGenPrepareInputs inputs;
+                inputs.commandList = commandList;
+                inputs.depth = depthResource_;
+                inputs.motionVectors = motionResource_;
+                inputs.renderSize = ctx.sceneRenderSize;
+                // Zero, and correct: BeamNG renders unjittered, and zero is the
+                // coherent description of an unjittered frame. See
+                // docs/LIMITATIONS.md §1.
+                inputs.jitterX = 0.0f;
+                inputs.jitterY = 0.0f;
+                inputs.motionVectorScaleX = fg.settings.calibration.motionVectorScaleX;
+                inputs.motionVectorScaleY = fg.settings.calibration.motionVectorScaleY;
+                inputs.frameTimeDeltaMs = gate.frameTimeMs;
+                inputs.reset = decision.requestReset;
+                if (shared_.cameraValid) {
+                    inputs.cameraNear = shared_.cameraNear;
+                    inputs.cameraFar = shared_.cameraFar;
+                    inputs.cameraFovVerticalRadians = shared_.cameraFovVerticalRadians;
+                }
+                // BeamNG's world unit is the metre, so no conversion applies.
+                inputs.viewSpaceToMetersFactor = 1.0f;
+                // cameraBasisValid stays false: Lua can read the camera's
+                // transform but the protocol does not carry it yet, and an
+                // identity basis would describe motion the camera is not
+                // making. FSR omits the fields rather than receiving a lie.
+
+                const Result dispatched = fg.generator.prepare(inputs, fg.settings, frameId_);
+                const Result submitted = ring_.submit();
+                prepared = dispatched.ok() && submitted.ok();
+                if (!dispatched && dispatched.reason() != lastPrepareFailure_) {
+                    lastPrepareFailure_ = dispatched.reason();
+                    BFSR_LOG_WARN("frame-generation prepare: %s", lastPrepareFailure_.c_str());
+                }
+            }
+        }
+
+        // Configure runs every frame, including the frames that are suppressed:
+        // it is what tells AMD's swapchain not to interpolate this one, and
+        // skipping it would leave the previous frame's decision in force.
+        fg.generator.configure(prepared, fg.settings, frameId_);
+        if (fg.antiLag.isActive()) fg.antiLag.markEndOfFrameRendering();
+    }
+
+    /// Rendered rate multiplied by what AMD's swapchain reported generating.
+    ///
+    /// Derived rather than measured, and labelled as such in the UI: the
+    /// bridge's Present hook runs once per *rendered* frame, so it cannot time
+    /// the generated ones directly.
+    [[nodiscard]] float computeDisplayedFps() const {
+        const float rendered = renderedFrameTimes_.averageFps();
+        if (!frameGen_ || rendered <= 0.0f) return rendered;
+        const uint32_t generated = frameGen_->generator.observedGeneratedPerFrame();
+        return rendered * static_cast<float>(1 + generated);
     }
 
     void detectEnvironment(ID3D12Device* device) {
@@ -304,6 +772,35 @@ private:
         if (!sysResult) BFSR_LOG_WARN("system detection: %s", sysResult.reason().c_str());
 
         capabilities_ = evaluateCapabilities(gpu_, system_);
+
+        // Upscaling has no per-frame execution path in this build, and saying
+        // so here is what stops the panel reporting "active" for something that
+        // never runs.
+        //
+        // The reason is structural rather than a missing feature. Upscaling
+        // means presenting more pixels than the game rendered, and a DXGI-level
+        // layer can only do that by substituting the swapchain's backbuffers:
+        // creating the real swapchain at display resolution, handing BeamNG
+        // smaller textures in place of its backbuffers, and reporting the
+        // smaller size from GetDesc so the engine sizes its viewports to match.
+        // Frame generation needs none of that — AMD's interpolation swapchain
+        // presents at the resolution the game already chose — which is why one
+        // product executes here and the other does not.
+        //
+        // Everything else for upscaling is real: the FSR context, the dispatch,
+        // the planner, the version selection. What is missing is the layer that
+        // would give it a colour input and an output to write. FUTURE_WORK.md
+        // describes it; docs/LIMITATIONS.md §11 records it as a limitation.
+        if (upscale_) {
+            markUnavailable({Feature::UpscalingMl, Feature::UpscalingAnalytical},
+                            "This build has no execution path for upscaling. Presenting more "
+                            "pixels than BeamNG rendered requires substituting the swapchain's "
+                            "backbuffers, which this bridge does not do. The frame generation "
+                            "product is unaffected and runs independently.");
+            BFSR_LOG_WARN("upscaling is installed but has no execution path in this build; "
+                          "see docs/LIMITATIONS.md section 11");
+        }
+
         logEnvironment(gpu_, system_, capabilities_);
 
         // Only load the AMD runtime if an installed product could use it.
@@ -468,7 +965,34 @@ private:
     ID3D12Device* realDevice_ = nullptr;
     D3D12DeviceProxy* deviceProxy_ = nullptr;
     ID3D12CommandQueue* gameQueue_ = nullptr;
-    IUnknown* gameSwapChain_ = nullptr;
+    SwapChainProxy* swapChainProxy_ = nullptr;
+
+    // --- per-frame driver state --------------------------------------------
+    FrameCommandRing ring_;
+    SharedFrameState shared_;
+    bool haveSharedState_ = false;
+    std::chrono::steady_clock::time_point lastPresent_{};
+    std::chrono::steady_clock::time_point lastRequestPoll_{};
+    std::chrono::steady_clock::time_point lastStatusPublish_{};
+    bool haveLastPresent_ = false;
+    bool windowOccluded_ = false;
+    uint64_t frameId_ = 0;
+    Extent2D displaySize_;
+
+    ID3D12Resource* depthResource_ = nullptr;
+    ID3D12Resource* motionResource_ = nullptr;
+    uint64_t beaconCacheGeneration_ = 0;
+    uint32_t cachedWidth_ = 0;
+    uint32_t cachedHeight_ = 0;
+    bool cachedSignatureValid_ = false;
+    bool beaconCacheValid_ = false;
+
+    std::string frameGenSwapChainFailure_;
+    bool reportedNoSwapChain_ = false;
+    std::string lastPrepareFailure_;
+    std::string lastLoggedDepthSource_;
+    std::string lastFrameGenIpcDiagnostic_;
+    std::string lastUpscaleIpcDiagnostic_;
 
     std::string depthSource_ = "not identified";
     std::string motionVectorSource_ = "not identified";
@@ -520,9 +1044,16 @@ BFSR_API void* bfsrCoreWrapFactory(void* factory, const IID* riid) {
 BFSR_API void* bfsrCoreWrapSwapChain(void* swapChain, void* queue, const IID* riid) {
     (void)queue;
     (void)riid;
-    // Swapchain substitution happens inside the wrapped factory, where the
-    // creation parameters are still in scope. This entry point exists for the
-    // stub's symmetry and deliberately does nothing.
+    // Substitution happens inside the wrapped factory instead — see
+    // BridgeRuntime::handleSwapChainCreated. It has to: AMD's
+    // frame-interpolation swapchain is created from the same call that created
+    // the game's, and the per-frame proxy has to wrap AMD's result rather than
+    // the raw DXGI object. By the time a stub could call this, the object the
+    // game will present through has already been decided.
+    //
+    // The export is kept because the dxgi stub resolves it by name and an
+    // absent export would make the stub fail to attach. It is a deliberate
+    // no-op, not an unimplemented one.
     return swapChain;
 }
 

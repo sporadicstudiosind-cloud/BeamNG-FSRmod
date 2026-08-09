@@ -31,6 +31,7 @@ angular.module('beamng.apps')
         scope.available = function (id) { return S.available(scope.status, id); };
         scope.reason = function (id) { return S.reason(scope.status, id); };
         scope.ready = function () { return S.ready(scope.status); };
+        scope.installed = function () { return S.installed(scope.status); };
         scope.metric = S.metric;
         scope.megabytes = S.megabytes;
         scope.notes = function (kind) { return S.notes(scope.status, kind); };
