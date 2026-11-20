@@ -20,7 +20,7 @@ is converted by llama.cpp's own convert_hf_to_gguf.py, so tokenizer handling sta
 
 Usage:
     python convert_littlebit_to_gguf.py <checkpoint dir or HF repo id> \
-        --llama-cpp /path/to/llama.cpp --outfile model.gguf [--bin-type q1_0] [--embd-type q4_0]
+        --llama-cpp /path/to/llama.cpp --outfile model.gguf [--bin-type q1_0] [--embd-type q8_0]
 """
 
 from __future__ import annotations
@@ -180,8 +180,9 @@ def main() -> int:
     ap.add_argument("--outfile", type=Path, required=True)
     ap.add_argument("--bin-type", choices=["q1_0", "tq1_0", "q8_0", "f16"], default="q1_0",
                     help="storage for the binary factors. q1_0 = 1.125 bpw (default), tq1_0 = 1.69 bpw, q8_0/f16 for debugging")
-    ap.add_argument("--embd-type", choices=["f16", "bf16", "q8_0", "q6_k", "q4_k", "q4_0"], default="q8_0",
-                    help="type for token_embd/output (these dominate the file size at sub-1-bit). default q8_0")
+    ap.add_argument("--embd-type", choices=["f16", "bf16", "q8_0", "q4_0"], default="q8_0",
+                    help="type for token_embd/output (these dominate the file size at sub-1-bit). default q8_0. "
+                         "For k-quants run llama-quantize afterwards (see README); it leaves the lb_* tensors untouched")
     ap.add_argument("--dense-dtype", choices=["f16", "bf16", "f32"], default="f16",
                     help="outtype passed to convert_hf_to_gguf.py for the non-LittleBit tensors")
     ap.add_argument("--force", action="store_true", help="convert even if the architecture is not in the tested list")
@@ -261,8 +262,7 @@ def main() -> int:
                 writer.add_string(f"littlebit.{k}", str(config[k]))
 
         embd_q = {"f16": gguf.GGMLQuantizationType.F16, "bf16": gguf.GGMLQuantizationType.BF16,
-                  "q8_0": gguf.GGMLQuantizationType.Q8_0, "q6_k": gguf.GGMLQuantizationType.Q6_K,
-                  "q4_k": gguf.GGMLQuantizationType.Q4_K, "q4_0": gguf.GGMLQuantizationType.Q4_0}[args.embd_type]
+                  "q8_0": gguf.GGMLQuantizationType.Q8_0, "q4_0": gguf.GGMLQuantizationType.Q4_0}[args.embd_type]
 
         n_bytes = {"dense": 0, "embd": 0, "lb": 0}
         for t in reader.tensors:
