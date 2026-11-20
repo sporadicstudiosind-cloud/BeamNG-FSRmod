@@ -1,0 +1,157 @@
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 269b920..865908f 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -1809,6 +1809,28 @@ ggml_tensor * llm_graph_context::build_lora_mm(
+           ggml_tensor * w,
+           ggml_tensor * cur,
+           ggml_tensor * w_s) const {
++    if (!model.littlebit.empty()) {
++        const auto it = model.littlebit.find(w);
++        if (it != model.littlebit.end()) {
++            // LittleBit: y = s_out * (U @ (s_mid * (V @ (s_in * x)))) [+ residual branch]
++            auto branch = [&](const llama_littlebit_branch & br) {
++                ggml_tensor * t = ggml_mul(ctx0, cur, br.s_in);
++                t = ggml_mul_mat(ctx0, br.v, t);
++                t = ggml_mul(ctx0, t, br.s_mid);
++                t = ggml_mul_mat(ctx0, br.u, t);
++                return ggml_mul(ctx0, t, br.s_out);
++            };
++            ggml_tensor * res = branch(it->second.main);
++            if (it->second.res.v) {
++                res = ggml_add(ctx0, res, branch(it->second.res));
++            }
++            if (w_s) {
++                res = ggml_mul(ctx0, res, w_s);
++            }
++            return res;
++        }
++    }
++
+     // a Hadamard-folded weight reads the transformed input; a LoRA delta lives in the primal basis and reads `cur`
+     ggml_tensor * cur_mm = build_hadamard_input(w, cur);
+     ggml_tensor * res = ggml_mul_mat(ctx0, w, cur_mm);
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index ac5266a..5df6b54 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -2532,6 +2532,13 @@ void llama_model_base::load_tensors_hadamard() {
+ }
+ 
+ ggml_tensor * llama_model_base::create_tensor(llama_model_loader & ml, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags) {
++    // LittleBit: a dense "<name>.weight" may be stored as binary latent factors "<name>.lb_*" instead
++    if (tn.suffix != nullptr && strcmp(tn.suffix, "weight") == 0 && !(flags & (TENSOR_DUPLICATED | TENSOR_SKIP))) {
++        if (ggml_tensor * w = create_tensor_littlebit(ml, tn, ne, flags)) {
++            return w;
++        }
++    }
++
+     const buft_list_t * buft_list_layer = nullptr;
+     if (tn.bid != -1) {
+         // blocks that are not model layers (e.g. the blocks of a head) go with the output
+@@ -2542,6 +2549,55 @@ ggml_tensor * llama_model_base::create_tensor(llama_model_loader & ml, const LLM
+         tn, ne, flags);
+ }
+ 
++ggml_tensor * llama_model_base::create_tensor_littlebit(llama_model_loader & ml, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags) {
++    const std::string name = tn.str();
++    if (ml.get_weight(name.c_str()) != nullptr) {
++        return nullptr; // dense weight present
++    }
++    const std::string base = name.substr(0, name.size() - strlen("weight"));
++    if (ml.get_weight((base + "lb_v").c_str()) == nullptr) {
++        return nullptr; // not a LittleBit weight either
++    }
++    GGML_ASSERT(ne.size() == 2 && "LittleBit factorization is only supported for 2D weights");
++    const int64_t n_in  = ne.begin()[0];
++    const int64_t n_out = ne.begin()[1];
++
++    auto load_branch = [&](const char * sv, const char * su, const char * ssi, const char * ssm, const char * sso,
++                           llama_littlebit_branch & br) -> bool {
++        const std::string nv = base + sv;
++        ggml_tensor * mv = ml.get_tensor_meta(nv.c_str());
++        if (mv == nullptr) {
++            return false;
++        }
++        const int64_t n_lat = mv->ne[1];
++        if (mv->ne[0] != n_in) {
++            throw std::runtime_error(format("%s: expected n_in = %lld, got %lld", nv.c_str(), (long long) n_in, (long long) mv->ne[0]));
++        }
++        const LLM_TN_IMPL tv (tn.arch, tn.tensor, sv,  tn.bid, tn.xid);
++        const LLM_TN_IMPL tu (tn.arch, tn.tensor, su,  tn.bid, tn.xid);
++        const LLM_TN_IMPL tsi(tn.arch, tn.tensor, ssi, tn.bid, tn.xid);
++        const LLM_TN_IMPL tsm(tn.arch, tn.tensor, ssm, tn.bid, tn.xid);
++        const LLM_TN_IMPL tso(tn.arch, tn.tensor, sso, tn.bid, tn.xid);
++        const int f = flags & ~TENSOR_NOT_REQUIRED;
++        br.v     = create_tensor(ml, tv,  {n_in,  n_lat}, f);
++        br.u     = create_tensor(ml, tu,  {n_lat, n_out}, f);
++        br.s_in  = create_tensor(ml, tsi, {n_in},         f);
++        br.s_mid = create_tensor(ml, tsm, {n_lat},        f);
++        br.s_out = create_tensor(ml, tso, {n_out},        f);
++        return true;
++    };
++
++    llama_littlebit_weight lw;
++    load_branch("lb_v",   "lb_u",   "lb_s_in",   "lb_s_mid",   "lb_s_out",   lw.main);
++    load_branch("lb_r_v", "lb_r_u", "lb_r_s_in", "lb_r_s_mid", "lb_r_s_out", lw.res);
++
++    if (lw.main.u == nullptr) {
++        return nullptr; // e.g. a skipped tensor
++    }
++    littlebit.emplace(lw.main.u, lw);
++    return lw.main.u;
++}
++
+ std::string llama_model::arch_name() const {
+     return llm_arch_name(arch);
+ }
+diff --git a/src/llama-model.h b/src/llama-model.h
+index 8d2f562..12e8b94 100644
+--- a/src/llama-model.h
++++ b/src/llama-model.h
+@@ -787,6 +787,25 @@ struct llama_hadamard {
+     llama_hadamard_rotations inv; // latent lookup table -> inverse transform
+ };
+ 
++// LittleBit / LittleBit-2 sub-1-bit factorized linear layer (arXiv:2506.13771, arXiv:2603.00042)
++// W ~= diag(s_out) * U * diag(s_mid) * V * diag(s_in), with U and V holding only {-1,0,+1} (stored as TQ1_0)
++// the optional residual branch has the same form and is added to the main branch
++struct llama_littlebit_branch {
++    ggml_tensor * v     = nullptr; // [n_in,  n_lat] binary latent factor V
++    ggml_tensor * u     = nullptr; // [n_lat, n_out] binary latent factor U
++    ggml_tensor * s_in  = nullptr; // [n_in]  input scale  (v2)
++    ggml_tensor * s_mid = nullptr; // [n_lat] latent scale (v1 * u2)
++    ggml_tensor * s_out = nullptr; // [n_out] output scale (u1)
++};
++
++struct llama_littlebit_weight {
++    llama_littlebit_branch main;
++    llama_littlebit_branch res;    // res.v == nullptr if there is no residual branch
++};
++
++// keyed by the tensor returned from create_tensor() in place of the dense weight (main.u)
++using llama_littlebit_weights = std::unordered_map<const ggml_tensor *, llama_littlebit_weight>;
++
+ struct llama_rope_params {
+     int32_t n_rot      = 0; // 0 if the layer has no RoPE
+     int32_t n_offs     = 0; // first rotated dim in a cached K head
+@@ -818,6 +837,9 @@ struct llama_model {
+ 
+     llama_hadamard hdmd;
+ 
++    // LittleBit factorized weights, empty for ordinary models
++    llama_littlebit_weights littlebit;
++
+     // see llama_model_set_attn_rot
+     bool attn_rot = true;
+ 
+@@ -1095,6 +1117,9 @@ struct llama_model_base : public llama_model {
+ 
+     ggml_tensor * create_tensor(llama_model_loader & ml, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags);
+ 
++    // LittleBit: create the latent factors of a factorized weight, returns nullptr if the weight is not factorized
++    ggml_tensor * create_tensor_littlebit(llama_model_loader & ml, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags);
++
+     // convenience overload of create_tensor that doesn't require llama_model_loader
+     ggml_tensor * create_tensor(const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags);
+ 

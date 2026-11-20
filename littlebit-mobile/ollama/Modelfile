@@ -1,0 +1,7 @@
+# Ollama Modelfile for a LittleBit GGUF produced by convert_littlebit_to_gguf.py.
+# Requires an Ollama built with scripts/build_ollama.sh. A stock Ollama does not have the patch,
+# so it fails to load the file with "missing tensor 'blk.0.attn_q.weight'".
+FROM ./model.gguf
+
+# phones: keep the context small, the KV cache is often bigger than the sub-1-bit weights
+PARAMETER num_ctx 2048
